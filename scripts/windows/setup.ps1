@@ -1,13 +1,15 @@
 ﻿﻿<#
   VinaNote Offline - cài AI Engine (Python) trên Windows 10/11 x64.
   Nhấp đúp setup-windows.cmd ở thư mục gốc, hoặc:
-    powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1 [-Gpu auto|cuda|vulkan|cpu] [-DownloadModels]
+    powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1 [-Gpu auto|cuda|vulkan|cpu] [-DownloadModels] [-Unattended]
   -Gpu auto   : có card NVIDIA (nvidia-smi) -> cuda, còn lại -> cpu
   -Gpu vulkan : card AMD / Intel Arc (llama.cpp chạy trên GPU, Whisper chạy CPU)
+  -Unattended : không hỏi gì (cho AI agent / script); bộ cài *setup.exe ở thư mục gốc được cài im lặng (/S)
 #>
 param(
     [ValidateSet("auto", "cuda", "vulkan", "cpu")] [string]$Gpu = "auto",
-    [switch]$DownloadModels
+    [switch]$DownloadModels,
+    [switch]$Unattended
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -101,10 +103,12 @@ try {
 Write-Host "`nHoàn tất! AI Engine ($Gpu) đã sẵn sàng. VINANOTE_ROOT = $Root" -ForegroundColor Green
 $Installer = Get-ChildItem $Root -Filter "VinaNote*setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($Installer) {
-    $Answer = Read-Host "Cài / cập nhật ứng dụng VinaNote Offline ngay bây giờ? (Y/n)"
+    $Answer = if ($Unattended) { "y" } else { Read-Host "Cài / cập nhật ứng dụng VinaNote Offline ngay bây giờ? (Y/n)" }
     if ($Answer -notmatch '^[nN]') {
         # WaitForExit, not -Wait: -Wait would also wait for the app if the installer's last page starts it.
-        $P = Start-Process $Installer.FullName -PassThru
+        $StartArgs = @{ FilePath = $Installer.FullName; PassThru = $true }
+        if ($Unattended) { $StartArgs.ArgumentList = "/S" }  # NSIS silent install for the current user, no UI
+        $P = Start-Process @StartArgs
         $P.WaitForExit()
         if ($P.ExitCode -ne 0) { Write-Warning "Bộ cài kết thúc với mã $($P.ExitCode)." }
     }

@@ -1,0 +1,13 @@
+# AI Worker on macOS Apple Silicon (MLX backend, models.py).
+# mlx / mlx-lm / mlx-whisper are pinned: models.py uses their internals (generate_step, KV cache, decoding).
+mlx==0.32.4
+mlx-lm==0.32.2
+mlx-whisper==0.4.3
+zerotts==0.1.5
+fastapi>=0.165
+uvicorn[standard]>=0.54
+python-multipart
+numpy
+huggingface_hub
+python-docx
+yt-dlp

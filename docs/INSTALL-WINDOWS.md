@@ -32,6 +32,8 @@ Trình duyệt dùng tiện ích: Chrome, Edge hoặc Brave. WebView2 có sẵn 
    Cách khác: chạy `setup-windows.cmd -DownloadModels` ngay ở bước 2.
 5. **Dùng thử**: vào tab **Họp & Âm thanh Máy** và bấm **Bắt đầu Nghe & Dịch**.
 
+**Cách khác: clone từ Git rồi nhờ AI cài hộ.** Clone repo vào `C:\VinaNote-Offline`, mở Claude Code hoặc Codex trong thư mục đó, rồi nói *"Cài đặt VinaNote Offline trên máy này"*. File `AGENTS.md` (Claude Code đọc qua `CLAUDE.md`) mô tả đủ các bước cho AI: kiểm tra máy, chạy `setup.ps1 -Unattended`, build bộ cài nếu trong repo chưa có, cài im lặng rồi kiểm tra. Bạn chỉ cần bấm đồng ý các hộp thoại quyền Admin (UAC) và tự nạp tiện ích trình duyệt.
+
 Kiểm tra lại cài đặt: trong tab **Trình duyệt & Model AI**, cả ba model phải báo *Đã cài đặt Offline*. Dòng **Thiết bị đang chạy** cho biết phần nhận dạng giọng nói và phần dịch đang chạy trên `cuda`/`gpu` hay `cpu`.
 
 ## 3. Cài tiện ích trình duyệt (YouTube, TikTok, Douyin, Bilibili, Facebook, Coursera, Udemy)

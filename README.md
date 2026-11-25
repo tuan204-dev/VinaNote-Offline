@@ -1,5 +1,7 @@
 # VinaNote Offline (macOS Apple Silicon & Windows — 100% On-Device AI)
 
+> **Nhờ AI cài hộ:** clone repo, mở Claude Code / Codex trong thư mục và nói "cài đặt VinaNote Offline trên máy này". Hướng dẫn cho AI nằm ở [AGENTS.md](AGENTS.md).
+>
 > **Windows 10/11:** xem hướng dẫn cài đặt tại [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md). Bản Windows dùng faster-whisper + llama.cpp (CUDA / Vulkan / CPU) thay cho MLX, và bộ thu âm WASAPI thay cho ScreenCaptureKit. Giao diện, tiện ích trình duyệt và luật dịch tiếng Việt giữ nguyên.
 
 Ứng dụng ghi âm cuộc họp, dịch phụ đề thời gian thực và thuyết minh lồng tiếng tiếng Việt **chạy 100% nội bộ (Offline)** trên máy Mac dùng chip Apple Silicon (M1/M2/M3/M4), đi kèm Tiện ích mở rộng trình duyệt cho **YouTube, TikTok, Douyin, Bilibili, Facebook, Coursera, Udemy**.

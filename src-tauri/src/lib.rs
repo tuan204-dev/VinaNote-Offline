@@ -68,13 +68,14 @@ fn resolve_project_root() -> PathBuf {
             return p;
         }
     }
-    // cwd and its parent, then the executable's folders (a dev build sits in src-tauri/target/[<triple>/]<profile>/)
+    // cwd and its parent, then the executable's folders: a build inside the repo finds it from
+    // src-tauri/target/[<triple>/]<profile>/ (Windows exe) or .../bundle/macos/X.app/Contents/MacOS/ (9 levels).
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         candidates.extend(cwd.ancestors().take(2).map(PathBuf::from));
     }
     if let Ok(exe) = std::env::current_exe() {
-        candidates.extend(exe.ancestors().skip(1).take(5).map(PathBuf::from));
+        candidates.extend(exe.ancestors().skip(1).take(9).map(PathBuf::from));
     }
     candidates
         .into_iter()

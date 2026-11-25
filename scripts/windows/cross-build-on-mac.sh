@@ -18,7 +18,7 @@ stage=release/windows/VinaNote-Offline
 rm -rf release/windows && mkdir -p "$stage/scripts/windows" "$stage/docs"
 rsync -a --exclude .venv --exclude __pycache__ --exclude .DS_Store --exclude verify_offline_pipeline.py \
   ai-worker browser-extension "$stage/"
-cp setup-windows.cmd README.md "$stage/"
+cp setup-windows.cmd README.md AGENTS.md CLAUDE.md "$stage/"
 cp scripts/windows/setup.ps1 "$stage/scripts/windows/"
 cp docs/INSTALL-WINDOWS.md "$stage/docs/"
 cp "$setup" "$stage/"
