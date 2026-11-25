@@ -16,6 +16,7 @@ import base64
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -23,7 +24,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import uvicorn
@@ -33,9 +34,30 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from dsp import AcousticEchoSuppressor, PitchGenderTracker, SAMPLE_RATE, StreamingVAD, TextEchoFilter
-from models import OfflineModelEngine, detect_script_lang
+from models import OfflineModelEngine, needs_vi_translation
 
 engine = OfflineModelEngine()
+
+# Under backlog the live loop merges queued VAD segments of one source into a single ASR/MT pass
+# (one encoder run instead of several), so it catches up without dropping speech.
+LIVE_MERGE_MAX_SEC = 8.0
+# Dubbing further behind than this many lines is stale: newer lines replace it.
+LIVE_TTS_MAX_QUEUED = 2
+PARTIAL_EMIT_INTERVAL_SEC = 0.08
+# Interim results of the segment still being spoken (low latency over GPU economy).
+INTERIM_MIN_SEC = 1.0
+INTERIM_EVERY_SEC = 0.6
+
+
+def split_clauses(text: str, min_words: int = 3) -> List[str]:
+    """Clause-sized dubbing pieces: the first plays while the rest is still being synthesized."""
+    clauses: List[str] = []
+    for piece in re.split(r"(?<=[,;:.!?…])\s+", text.strip()):
+        if clauses and (len(piece.split()) < min_words or len(clauses[-1].split()) < min_words):
+            clauses[-1] += " " + piece
+        elif piece:
+            clauses.append(piece)
+    return clauses
 
 
 @asynccontextmanager
@@ -522,6 +544,7 @@ async def ws_live(ws: WebSocket) -> None:
         "translate": True,
         "speak_vi": False,
         "tts_voice": "auto",
+        "interim": True,
     }
 
     vads = {
@@ -531,27 +554,54 @@ async def ws_live(ws: WebSocket) -> None:
     text_echo = TextEchoFilter()
     pitch_tracker = PitchGenderTracker()
     context_window: List[str] = []
-    job_q: asyncio.Queue[Optional[Tuple[np.ndarray, float, str]]] = asyncio.Queue(maxsize=12)
+    # (pcm, started_at, source, segment_id, interim)
+    job_q: asyncio.Queue[Optional[Tuple[np.ndarray, float, str, int, bool]]] = asyncio.Queue(maxsize=12)
+    tts_q: asyncio.Queue[Optional[Tuple[str, str, str]]] = asyncio.Queue()
+    session_tag = uuid.uuid4().hex[:6]  # utterance ids stay unique across sessions
+    gpu_busy = [False]
+    last_interim_at: Dict[str, float] = {}
+    shown_interims: Dict[str, set] = {name: set() for name in vads}  # segment ids with interim text shown
+
+    def utt_id_of(source: str, seg_id: int) -> str:
+        return f"{source}-{session_tag}-{seg_id}"
+
+    def speaker_of(source: str) -> str:
+        return "Âm thanh máy" if source == "system" else "Tôi (Micro)"
 
     def emit(msg: Dict[str, Any]) -> None:
         loop.call_soon_threadsafe(send_q.put_nowait, msg)
+
+    def put_job(job: Tuple[np.ndarray, float, str, int, bool]) -> None:
+        try:
+            job_q.put_nowait(job)
+        except asyncio.QueueFull:
+            # Drop oldest segment to preserve real-time live edge!
+            try:
+                job_q.get_nowait()
+                job_q.put_nowait(job)
+            except Exception:
+                pass
 
     def on_clean_pcm(pcm: np.ndarray, ts: float, source: str) -> None:
         vad = vads.get(source)
         if not vad:
             return
-        for seg_pcm, dur in vad.feed(pcm):
+        for seg_pcm, dur, seg_id in vad.feed(pcm):
             pitch_tracker.observe(source, seg_pcm)
-            started_at = ts - dur
-            try:
-                job_q.put_nowait((seg_pcm, started_at, source))
-            except asyncio.QueueFull:
-                # Drop oldest segment to preserve real-time live edge!
-                try:
-                    job_q.get_nowait()
-                    job_q.put_nowait((seg_pcm, started_at, source))
-                except Exception:
-                    pass
+            put_job((seg_pcm, ts - dur, source, seg_id, False))
+        # Interim result of the segment still being spoken, only while the GPU loop is idle:
+        # Vietnamese shows up during speech instead of after the speaker pauses.
+        active = vad.active_audio() if session_cfg["interim"] else None
+        now = time.monotonic()
+        if (
+            active is not None
+            and not gpu_busy[0]
+            and job_q.empty()
+            and active[0].size >= INTERIM_MIN_SEC * SAMPLE_RATE
+            and now - last_interim_at.get(source, 0.0) >= INTERIM_EVERY_SEC
+        ):
+            last_interim_at[source] = now
+            put_job((active[0], ts - active[0].size / SAMPLE_RATE, source, active[1], True))
 
     echo_suppressor = AcousticEchoSuppressor(on_clean_pcm)
 
@@ -565,95 +615,175 @@ async def ws_live(ws: WebSocket) -> None:
         except Exception:
             pass
 
-    async def inference_loop() -> None:
+    def queue_tts(item: Tuple[str, str, str]) -> None:
+        while tts_q.qsize() >= LIVE_TTS_MAX_QUEUED:
+            tts_q.get_nowait()
+        tts_q.put_nowait(item)
+
+    async def tts_loop() -> None:
+        """ZeroTTS runs on CPU here, off the GPU loop: it used to block ASR+MT of the next segment
+        for 1-2 s per line, so the live pipeline fell further behind with dubbing on."""
         while True:
-            job = await job_q.get()
-            if job is None:
+            item = await tts_q.get()
+            if item is None:
                 break
-            seg_pcm, started_at, source = job
-            utt_id = f"{source}-{uuid.uuid4().hex[:8]}"
+            utt_id, vi_text, source = item
             try:
-                asr = await asyncio.to_thread(
-                    engine.transcribe, seg_pcm, session_cfg["language"], False
+                chosen_voice = (
+                    pitch_tracker.preferred_voice(source)
+                    if session_cfg["tts_voice"] == "auto"
+                    else session_cfg["tts_voice"]
                 )
-                text = asr["text"].strip()
-                if not text:
-                    continue
-                if source == "system":
-                    text_echo.record_system(text)
-                elif text_echo.is_mic_echo(text):
-                    continue
-
-                lang = asr["language"]
-                speaker = "Âm thanh máy" if source == "system" else "Tôi (Micro)"
-                emit({
-                    "type": "transcript",
-                    "id": utt_id,
-                    "source": source,
-                    "speaker": speaker,
-                    "language": lang,
-                    "text": text,
-                    "started_at": round(started_at, 2),
-                    "duration_sec": round(seg_pcm.size / SAMPLE_RATE, 2),
-                    "asr_ms": asr["asr_ms"],
-                })
-
-                if session_cfg["translate"] and lang != "vi" and detect_script_lang(text) != "vi":
-                    t_trans = time.monotonic()
-                    vi_text = await asyncio.to_thread(
-                        engine.translate_utterance,
-                        text,
-                        lang,
-                        list(context_window[-3:]),
-                        session_cfg["style"],
+                for c_idx, clause_txt in enumerate(split_clauses(vi_text)):
+                    wav_bytes, sr, dur = await asyncio.to_thread(
+                        engine.synthesize_wav_bytes, clause_txt, chosen_voice
                     )
-                    trans_ms = round((time.monotonic() - t_trans) * 1000, 1)
-                    if vi_text:
+                    if wav_bytes:
                         emit({
-                            "type": "translation",
-                            "id": utt_id,
-                            "source": source,
-                            "speaker": speaker,
-                            "text": vi_text,
-                            "translate_ms": trans_ms,
+                            "type": "tts_audio",
+                            "id": f"{utt_id}-{c_idx}",
+                            "voice": chosen_voice,
+                            "duration_sec": round(dur, 2),
+                            "wav_b64": base64.b64encode(wav_bytes).decode("ascii"),
                         })
-                        if session_cfg["speak_vi"]:
-                            chosen_voice = (
-                                pitch_tracker.preferred_voice(source)
-                                if session_cfg["tts_voice"] == "auto"
-                                else session_cfg["tts_voice"]
-                            )
-                            # Split long Vietnamese sentence at first clause (>=4 words) so first audio plays in ~280ms!
-                            clauses = [vi_text]
-                            for sep in (", ", "; ", ". ", "! ", "? "):
-                                if sep in vi_text:
-                                    idx_sep = vi_text.find(sep)
-                                    left = vi_text[: idx_sep + 1].strip()
-                                    right = vi_text[idx_sep + len(sep) :].strip()
-                                    if len(left.split()) >= 4 and len(right.split()) >= 2:
-                                        clauses = [left, right]
-                                        break
-                            for c_idx, clause_txt in enumerate(clauses):
-                                wav_bytes, sr, dur = await asyncio.to_thread(
-                                    engine.synthesize_wav_bytes, clause_txt, chosen_voice
-                                )
-                                if wav_bytes:
-                                    emit({
-                                        "type": "tts_audio",
-                                        "id": f"{utt_id}-{c_idx}",
-                                        "voice": chosen_voice,
-                                        "duration_sec": round(dur, 2),
-                                        "wav_b64": base64.b64encode(wav_bytes).decode("ascii"),
-                                    })
-
-                context_window.append(text)
-                if len(context_window) > 10:
-                    del context_window[:-10]
             except Exception as exc:
                 emit({"type": "error", "message": str(exc)})
 
+    def retract(source: str, seg_ids: List[int]) -> None:
+        for seg_id in seg_ids:
+            if seg_id in shown_interims[source]:
+                shown_interims[source].discard(seg_id)
+                emit({"type": "retract", "id": utt_id_of(source, seg_id), "source": source})
+
+    async def translate(utt_id: str, text: str, lang: str, source: str, should_stop=None) -> str:
+        last_partial = [0.0]
+
+        def on_partial(partial: str) -> None:
+            now = time.monotonic()
+            if now - last_partial[0] >= PARTIAL_EMIT_INTERVAL_SEC:
+                last_partial[0] = now
+                emit({"type": "translation_partial", "id": utt_id, "source": source,
+                      "speaker": speaker_of(source), "text": partial})
+
+        return await asyncio.to_thread(
+            engine.translate_utterance,
+            text,
+            lang,
+            list(context_window[-3:]),
+            session_cfg["style"],
+            on_partial,
+            should_stop,
+        )
+
+    async def run_interim(pcm: np.ndarray, started_at: float, source: str, seg_id: int) -> None:
+        asr = await asyncio.to_thread(engine.transcribe_fast, pcm, session_cfg["language"])
+        text = asr["text"].strip()
+        if not text or not job_q.empty() or (source != "system" and text_echo.is_mic_echo(text)):
+            return
+        utt_id = utt_id_of(source, seg_id)
+        lang = asr["language"]
+        needs_translation = bool(session_cfg["translate"]) and needs_vi_translation(text, lang)
+        shown_interims[source].add(seg_id)
+        emit({
+            "type": "transcript",
+            "interim": True,
+            "id": utt_id,
+            "source": source,
+            "speaker": speaker_of(source),
+            "language": lang,
+            "text": text,
+            "needs_translation": needs_translation,
+            "started_at": round(started_at, 2),
+            "duration_sec": round(pcm.size / SAMPLE_RATE, 2),
+            "asr_ms": asr["asr_ms"],
+        })
+        if needs_translation:
+            # Gives way the moment a final segment is queued; partials already shown stay until replaced.
+            vi_text = await translate(utt_id, text, lang, source, should_stop=lambda: not job_q.empty())
+            if vi_text:
+                emit({"type": "translation_partial", "id": utt_id, "source": source,
+                      "speaker": speaker_of(source), "text": vi_text})
+
+    async def run_final(pcm: np.ndarray, started_at: float, source: str, seg_ids: List[int]) -> None:
+        seg_id = seg_ids[0]
+        # Interim lines replaced by this merged final, or whose segment never got a final.
+        retract(source, [i for i in shown_interims[source] if i <= seg_ids[-1] and i != seg_id])
+        asr = await asyncio.to_thread(engine.transcribe_fast, pcm, session_cfg["language"])
+        text = asr["text"].strip()
+        if not text or (source != "system" and text_echo.is_mic_echo(text)):
+            retract(source, [seg_id])
+            return
+        if source == "system":
+            text_echo.record_system(text)
+        shown_interims[source].discard(seg_id)
+
+        utt_id = utt_id_of(source, seg_id)
+        lang = asr["language"]
+        needs_translation = bool(session_cfg["translate"]) and needs_vi_translation(text, lang)
+        emit({
+            "type": "transcript",
+            "interim": False,
+            "id": utt_id,
+            "source": source,
+            "speaker": speaker_of(source),
+            "language": lang,
+            "text": text,
+            "needs_translation": needs_translation,
+            "started_at": round(started_at, 2),
+            "duration_sec": round(pcm.size / SAMPLE_RATE, 2),
+            "asr_ms": asr["asr_ms"],
+        })
+        if needs_translation:
+            t_trans = time.monotonic()
+            vi_text = await translate(utt_id, text, lang, source)
+            if vi_text:
+                emit({
+                    "type": "translation",
+                    "id": utt_id,
+                    "source": source,
+                    "speaker": speaker_of(source),
+                    "text": vi_text,
+                    "translate_ms": round((time.monotonic() - t_trans) * 1000, 1),
+                })
+                if session_cfg["speak_vi"]:
+                    queue_tts((utt_id, vi_text, source))
+
+        context_window.append(text)
+        if len(context_window) > 10:
+            del context_window[:-10]
+
+    async def inference_loop() -> None:
+        held: List[Any] = []  # a dequeued job of the other source, processed next
+        while True:
+            job = held.pop() if held else await job_q.get()
+            if job is None:
+                break
+            seg_pcm, started_at, source, seg_id, interim = job
+            if interim and not job_q.empty():
+                continue  # newer audio is already queued
+            seg_ids = [seg_id]
+            while not interim and not job_q.empty() and seg_pcm.size < LIVE_MERGE_MAX_SEC * SAMPLE_RATE:
+                nxt = job_q.get_nowait()
+                if nxt is None or nxt[2] != source:
+                    held.append(nxt)
+                    break
+                if not nxt[4]:  # an interim snapshot is superseded by the merged final
+                    seg_pcm = np.concatenate((seg_pcm, nxt[0]))
+                    seg_ids.append(nxt[3])
+            gpu_busy[0] = True
+            try:
+                if interim:
+                    await run_interim(seg_pcm, started_at, source, seg_id)
+                else:
+                    await run_final(seg_pcm, started_at, source, seg_ids)
+            except Exception as exc:
+                emit({"type": "error", "message": str(exc)})
+            finally:
+                gpu_busy[0] = False
+
     sender_task = asyncio.create_task(sender_loop())
     infer_task = asyncio.create_task(inference_loop())
+    tts_task = asyncio.create_task(tts_loop())
 
     emit({"type": "connected", "status": engine.status()})
 
@@ -663,7 +793,7 @@ async def ws_live(ws: WebSocket) -> None:
             data = json.loads(raw_msg)
             mtype = data.get("type")
             if mtype == "config":
-                for k in ("language", "style", "translate", "speak_vi", "tts_voice"):
+                for k in ("language", "style", "translate", "speak_vi", "tts_voice", "interim"):
                     if k in data:
                         session_cfg[k] = data[k]
                 emit({"type": "config_ack", "config": session_cfg})
@@ -681,8 +811,8 @@ async def ws_live(ws: WebSocket) -> None:
                 for src_name, vad in vads.items():
                     rem = vad.flush()
                     if rem is not None:
-                        seg_pcm, dur = rem
-                        await job_q.put((seg_pcm, time.time() - dur, src_name))
+                        seg_pcm, dur, seg_id = rem
+                        await job_q.put((seg_pcm, time.time() - dur, src_name, seg_id, False))
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -690,6 +820,8 @@ async def ws_live(ws: WebSocket) -> None:
     finally:
         await job_q.put(None)
         await infer_task
+        await tts_q.put(None)
+        await tts_task
         await send_q.put(None)
         await sender_task
 

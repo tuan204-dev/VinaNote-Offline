@@ -124,7 +124,7 @@ async function startCapture(streamId, tabId, options) {
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "transcript" || msg.type === "translation" || msg.type === "error") {
+      if (msg.type === "transcript" || msg.type === "translation_partial" || msg.type === "translation" || msg.type === "retract" || msg.type === "error") {
         chrome.runtime.sendMessage({
           target: "background",
           type: "overlay-event",

@@ -72,6 +72,55 @@ TRANSLATE_SYS_PROMPTS = {
     ),
 }
 
+# Worked examples frozen into the prefix KV-cache (free per request): lowercase auto-caption
+# fragments, Chinese, and names/acronyms that must stay as written.
+TRANSLATE_FEW_SHOT = (
+    ("so we're going to talk about three things today and the first one is latency",
+     "Hôm nay chúng ta sẽ nói về ba điều, và điều đầu tiên là độ trễ."),
+    ("这个功能其实非常实用，尤其是在出差的时候。",
+     "Tính năng này thực ra rất hữu ích, nhất là khi đi công tác."),
+    ("The new iPhone runs this model locally on the GPU, which is way faster.",
+     "iPhone mới chạy mô hình này cục bộ trên GPU, nhanh hơn hẳn."),
+)
+
+# Decoding Vietnamese: a Latin-only token that is no Vietnamese syllable (onset + rhyme with the
+# diacritics stripped) is an untranslated foreign word ("harder", "Things", "discuss").
+_VI_SYLLABLE_SHAPE = re.compile(
+    r"(?:ngh|ng|nh|ch|gh|gi|kh|ph|qu|th|tr|[bcdghklmnprstvx])?"
+    r"(?:oai|oay|oeo|uay|uya|uye|uyu|uoi|uou|ieu|yeu|ai|ao|au|ay|eo|eu|ia|iu|oa|oe|oi|oo|ua|ue|ui|uo|uu|uy|ie|ye|[aeiouy])?"
+    r"(?:ch|ng|nh|[cmnpt])?"
+)
+# Latin words Vietnamese subtitles keep (auto-captions arrive lowercase, so names can't be told by case).
+KEEP_LATIN_WORDS = {
+    "gpu", "cpu", "api", "ram", "llm", "ssd", "usb", "token", "app", "web", "website", "email", "video",
+    "clip", "online", "offline", "laptop", "smartphone", "internet", "wifi", "bluetooth", "chip", "game",
+    "livestream", "youtube", "tiktok", "facebook", "google", "apple", "iphone", "ipad", "macbook",
+    "android", "windows", "chatgpt", "openai", "nvidia", "samsung", "microsoft", "amazon", "logo",
+    "menu", "file", "link", "camera", "robot", "vlog", "blog", "idol", "show", "team", "fps", "ghz", "mhz",
+}
+LATIN_PENALTY = 6.0  # logit penalty: a strongly preferred name still passes, casual leaks don't
+LATIN_BAN = 1e9      # retry after a failed check: no untranslated Latin words at all
+# UTF-8 lead bytes of scripts that never belong in a Vietnamese line: Cyrillic..Arabic (D0-DF),
+# Indic/Thai (E0), CJK/kana/hangul (E3-ED), private use/fullwidth (EE-EF), emoji (F0-F4).
+_FOREIGN_LEAD_BYTES = frozenset([*range(0xD0, 0xE1), *range(0xE3, 0xF5)])
+
+
+def _bpe_byte_decoder() -> Dict[str, int]:
+    """GPT-2 byte-level BPE alphabet (Qwen2 tokenizers): token character -> raw byte."""
+    kept = [*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)]
+    moved = [b for b in range(256) if b not in kept]
+    return {**{chr(b): b for b in kept}, **{chr(256 + i): b for i, b in enumerate(moved)}}
+
+
+def _is_foreign_script(raw: bytes) -> bool:
+    for i, b in enumerate(raw):
+        if b in _FOREIGN_LEAD_BYTES:
+            return True
+        # E1 xx: only U+1E00-1EFF (Vietnamese letters carrying tone marks) belongs in Vietnamese.
+        if b == 0xE1 and i + 1 < len(raw) and not 0xB8 <= raw[i + 1] <= 0xBB:
+            return True
+    return False
+
 
 def clean_vi_output(raw: str) -> str:
     s = (raw or "").replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
@@ -92,13 +141,15 @@ def is_valid_vi_translation(src_text: str, vi_text: str) -> bool:
         return True
     if not vi:
         return False
-    if CJK_RE.search(vi) or FOREIGN_GLITCH_RE.search(vi):
+    if CJK_RE.search(vi) or FOREIGN_GLITCH_RE.search(vi) or has_phrase_loop(vi):
         return False
     if detect_script_lang(src) == "vi":
         return True
 
-    # Guard against runaway multi-sentence merging/hallucination (e.g. 4 sentences collapsed into 1)
-    if len(src) >= 12 and len(vi) > max(int(len(src) * 2.6), len(src) + 90):
+    # Guard against runaway multi-sentence merging/hallucination (e.g. 4 sentences collapsed into 1).
+    # One Chinese/Japanese character often becomes a whole Vietnamese syllable (~4 letters).
+    ratio = 6.0 if CJK_RE.search(src) else 2.6
+    if len(src) >= 12 and len(vi) > max(int(len(src) * ratio), len(src) + 90):
         return False
 
     # CJK source must produce Vietnamese diacritics if >= 3 words
@@ -155,6 +206,11 @@ HALLUCINATION_PREFIXES = (
 )
 
 
+# Letters only Vietnamese uses. French/Spanish/Portuguese accents (é, à, ã, ô...) are no proof of
+# Vietnamese, and counting them left whole Spanish/French lines untranslated.
+VI_ONLY_LETTERS = set("ăđĩũơưạảấầẩẫậắằẳẵặẹẻẽếềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ")
+
+
 def detect_script_lang(text: str) -> str:
     letters = [c for c in text.lower() if c.isalpha()]
     if not letters:
@@ -162,9 +218,23 @@ def detect_script_lang(text: str) -> str:
     cjk_ratio = sum("\u4e00" <= c <= "\u9fff" for c in letters) / len(letters)
     if cjk_ratio >= 0.25:
         return "zh"
+    # About 1 in 3 Vietnamese syllables carries a Vietnamese-only letter; 0.1/word tolerates loanwords.
     words = max(1, len(text.split()))
-    vi_ratio = sum(c in VI_DIACRITICS for c in letters) / words
-    return "vi" if vi_ratio >= 0.2 else "en"
+    return "vi" if sum(c in VI_ONLY_LETTERS for c in letters) / words >= 0.1 else "en"
+
+
+def needs_vi_translation(text: str, source_lang: str = "auto") -> bool:
+    """True for foreign speech/captions that must be shown in Vietnamese."""
+    if (source_lang or "").lower().startswith("vi"):
+        return False
+    return any(c.isalpha() for c in text) and detect_script_lang(text) != "vi"
+
+
+def has_phrase_loop(text: str, n: int = 4) -> bool:
+    """The same n-word phrase twice in one subtitle line means the decoder looped."""
+    words = re.findall(r"\w+", text.lower())
+    grams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
+    return len(grams) != len(set(grams))
 
 
 def is_whisper_hallucination(text: str) -> bool:
@@ -211,32 +281,24 @@ class OfflineModelEngine:
         self._download_progress: Dict[str, Any] = {"state": "idle", "step": "", "percent": 0}
         self._caption_cache: Dict[str, str] = {}
         self._prefix_caches: Dict[str, Tuple[Any, str]] = {}
+        self._vocab_masks_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None
         self._whisper_warmed: bool = False
 
     def warmup_all(self) -> None:
-        """Pre-warms Qwen2.5-7B + Frozen System-Prompt KV-Caches + MLX Whisper + ZeroTTS in Unified Memory."""
+        """Pre-warms Qwen2.5-7B + few-shot prefix KV-caches + vocabulary masks + MLX Whisper + ZeroTTS."""
         try:
-            with GPU_LOCK:
-                if self.llm_path or _resolve_local_snapshot(LLM_REPO):
-                    import mlx_lm
-                    from mlx_lm.sample_utils import make_sampler
-                    model, tok = self.ensure_llm()
+            if self.llm_path or _resolve_local_snapshot(LLM_REPO):
+                with GPU_LOCK:
+                    self.ensure_llm()
                     self._get_or_build_prefix_cache("natural")
                     self._get_or_build_prefix_cache("literal")
-                    dummy = tok.encode("<|im_start|>user\nOK<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
-                    mlx_lm.batch_generate(
-                        model, tok, [dummy, dummy], max_tokens=2, sampler=make_sampler(temp=0.0)
-                    )
-                self.whisper_path = self.whisper_path or _resolve_local_snapshot(WHISPER_REPO)
-                if self.whisper_path and not self._whisper_warmed:
-                    import mlx_whisper
-                    mlx_whisper.transcribe(
-                        np.zeros(8000, dtype=np.float32),
-                        path_or_hf_repo=self.whisper_path,
-                        temperature=0.0,
-                        condition_on_previous_text=False,
-                    )
-                    self._whisper_warmed = True
+                # Builds the vocab masks and compiles kernels for short and sentence-length prompts
+                # (the first real sentence otherwise waited ~1.6 s for its first token).
+                self._translate_one("Hello everyone.")
+                self._translate_one("So the first thing you want to do is open the settings panel and turn it on.")
+            self.whisper_path = self.whisper_path or _resolve_local_snapshot(WHISPER_REPO)
+            if self.whisper_path:
+                self.transcribe_fast(np.zeros(16000, dtype=np.float32), "en")
         except Exception:
             pass
         try:
@@ -411,6 +473,56 @@ class OfflineModelEngine:
             "asr_ms": elapsed_ms,
         }
 
+    def transcribe_fast(self, audio_f32: np.ndarray, language: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Live-segment ASR (no word timings). `mlx_whisper.transcribe` runs the encoder twice over a
+        padded 30 s window (language detection, then decoding): ~1 s for any 2-4 s VAD segment on an
+        M2 Pro. Here the encoder runs once over a window cut to the audio (min 10 s) and its features
+        feed both language detection and decoding: ~0.2 s, same text on the EN/ZH test clips.
+        """
+        import mlx.core as mx
+        import mlx.nn as nn
+        from mlx_whisper.audio import HOP_LENGTH, N_FRAMES, log_mel_spectrogram, pad_or_trim
+        from mlx_whisper.decoding import DecodingOptions, decode, detect_language
+        from mlx_whisper.transcribe import ModelHolder
+
+        self.whisper_path = self.whisper_path or _resolve_local_snapshot(WHISPER_REPO)
+        if not self.whisper_path:
+            raise RuntimeError(f"Model Whisper chưa được tải ({WHISPER_REPO}).")
+        t0 = time.monotonic()
+        lang = None if (not language or language == "auto") else language
+        # ponytail: 10 s floor keeps Whisper near its 30 s training window; lower it only after testing noisy audio.
+        frames = min(N_FRAMES, max(1000, int((audio_f32.size / 16000 + 1.5) * 100)))
+        frames += frames % 2  # conv2 has stride 2
+        with GPU_LOCK:
+            model = ModelHolder.get_model(self.whisper_path, mx.float16)  # same instance transcribe() uses
+            mel = log_mel_spectrogram(audio_f32, n_mels=model.dims.n_mels,
+                                      padding=max(0, frames * HOP_LENGTH - audio_f32.size))
+            mel = pad_or_trim(mel[:frames], frames, axis=-2).astype(mx.float16)[None]
+            enc = model.encoder
+            x = nn.gelu(enc.conv2(nn.gelu(enc.conv1(mel))))
+            x = x + enc._positional_embedding[: x.shape[1]]
+            for block in enc.blocks:
+                x, _, _ = block(x)
+            feats = enc.ln_post(x)
+            full_ctx = model.dims.n_audio_ctx
+            model.dims.n_audio_ctx = feats.shape[1]  # detect_language/decode take features as-is only on a size match
+            try:
+                if lang is None:
+                    _, probs = detect_language(model, feats)
+                    lang = max(probs[0], key=probs[0].get)
+                res = decode(model, feats, DecodingOptions(
+                    language=lang, without_timestamps=True, temperature=0.0, fp16=True))[0]
+            finally:
+                model.dims.n_audio_ctx = full_ctx
+            self._whisper_warmed = True
+        text = res.text.strip()
+        silent = res.no_speech_prob > 0.6 and res.avg_logprob < -1.0
+        if silent or res.compression_ratio > 2.4 or is_whisper_hallucination(text):
+            text = ""
+        return {"text": text, "language": lang, "segments": [], "words": [],
+                "asr_ms": round((time.monotonic() - t0) * 1000, 1)}
+
     # ---------------- LLM Generation & Prefix KV-Cache Engine ----------------
 
     def _get_or_build_prefix_cache(self, style: str) -> Tuple[Any, str]:
@@ -425,14 +537,14 @@ class OfflineModelEngine:
 
         model, tokenizer = self.ensure_llm()
         sentinel = "<<<VN_CUE>>>"
-        full_tpl = tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": TRANSLATE_SYS_PROMPTS[key]},
-                {"role": "user", "content": sentinel},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        messages = [{"role": "system", "content": TRANSLATE_SYS_PROMPTS[key]}]
+        for src_ex, vi_ex in TRANSLATE_FEW_SHOT:
+            messages += [
+                {"role": "user", "content": f"Dịch sang tiếng Việt: {src_ex}"},
+                {"role": "assistant", "content": vi_ex},
+            ]
+        messages.append({"role": "user", "content": sentinel})
+        full_tpl = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         prefix_str, suffix_str = full_tpl.split(sentinel, 1)
         prefix_ids = tokenizer.encode(prefix_str, add_special_tokens=False)
         p_cache = make_prompt_cache(model)
@@ -461,6 +573,7 @@ class OfflineModelEngine:
                 messages, tokenize=False, add_generation_prompt=True
             )
             sampler = make_sampler(temp=0.0)
+            no_foreign_script = self._vi_logit_bias(model, tokenizer, "", 0.0)
             out = generate(
                 model,
                 tokenizer,
@@ -468,6 +581,7 @@ class OfflineModelEngine:
                 max_tokens=max_tokens,
                 sampler=sampler,
                 verbose=False,
+                logits_processors=[lambda _tokens, logits: logits + no_foreign_script],
             )
         return out.strip()
 
@@ -483,111 +597,97 @@ class OfflineModelEngine:
             cloned.append(nc)
         return cloned
 
-    def _repair_cjk_if_needed(self, vi_text: str) -> str:
-        if not CJK_RE.search(vi_text) and not FOREIGN_GLITCH_RE.search(vi_text):
-            return vi_text
-        repaired = self._llm_chat(
-            system_prompt=(
-                "Viết lại câu sau hoàn toàn bằng tiếng Việt có dấu tự nhiên, dịch sạch mọi chữ Hán/Nhật/Hàn hoặc ký tự lạ còn sót. "
-                "Chỉ trả về đúng câu tiếng Việt đã sửa."
-            ),
-            user_prompt=vi_text,
-            max_tokens=220,
-        )
-        cleaned = clean_vi_output(CJK_RE.sub("", FOREIGN_GLITCH_RE.sub("", repaired)))
-        return cleaned or CJK_RE.sub("", FOREIGN_GLITCH_RE.sub("", vi_text)).strip()
+    # ---------------- Vietnamese-only decoding ----------------
 
-    def _strict_retranslate_vi(self, src_text: str) -> str:
-        """Fallback strict 7B re-translation triggered whenever any cue fails Vietnamese output validation."""
-        repaired = self._llm_chat(
-            system_prompt=(
-                "Bản dịch trước bị lỗi vì còn sót tiếng nước ngoài. "
-                "Hãy dịch TOÀN BỘ câu sau sang tiếng Việt có dấu tự nhiên, chính xác, dễ hiểu. "
-                "TUYỆT ĐỐI không lặp lại câu tiếng Anh gốc, không để từ nối tiếng Anh (the, is, with, which, having...), "
-                "không để chữ Hán, giữ nguyên tên riêng/từ viết tắt (AI, GPU, API, Neon, token). "
-                "Chỉ trả về duy nhất 1 câu tiếng Việt."
-            ),
-            user_prompt=f"Câu gốc cần dịch sang tiếng Việt: {src_text}",
-            max_tokens=min(160, max(40, len(src_text.split()) * 5 + 28)),
-        )
-        cleaned = self._repair_cjk_if_needed(clean_vi_output(repaired))
-        return cleaned or src_text
+    def _vocab_masks(self, tokenizer: Any, vocab_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        """(foreign-script tokens, untranslated-Latin-word tokens) over the LLM vocabulary, built once."""
+        cached = self._vocab_masks_cache
+        if cached is not None and cached[0].size == vocab_size:
+            return cached
+        byte_of = _bpe_byte_decoder()
+        foreign = np.zeros(vocab_size, dtype=bool)
+        latin = np.zeros(vocab_size, dtype=bool)
+        special = set(tokenizer.all_special_ids or [])
+        for piece, tid in tokenizer.get_vocab().items():
+            if tid >= vocab_size or tid in special:
+                continue
+            try:
+                raw = bytes(byte_of[ch] for ch in piece)
+            except KeyError:  # added tokens are not byte-level pieces
+                continue
+            if _is_foreign_script(raw):
+                foreign[tid] = True
+            elif raw.isascii():
+                # Punctuation is stripped: the model dodged the check with "-idle", "sẽ-discuss".
+                word = raw.decode("ascii").strip().strip("-_'.,:;!?\"()[]/").lower()
+                latin[tid] = (len(word) >= 2 and word.isalpha() and word not in KEEP_LATIN_WORDS
+                              and not _VI_SYLLABLE_SHAPE.fullmatch(word))
+        self._vocab_masks_cache = (foreign, latin)
+        return self._vocab_masks_cache
 
-    def _batch_translate_cues_gpu(self, src_texts: List[str], style: str = "natural") -> List[str]:
+    def _vi_logit_bias(self, model: Any, tokenizer: Any, src: str, latin_penalty: float) -> Any:
+        """Additive logits for Vietnamese output: CJK/kana/hangul/Cyrillic/emoji tokens are banned,
+        Latin words shaped like no Vietnamese syllable cost `latin_penalty` unless the source names them."""
+        import mlx.core as mx
+
+        vocab = int(model.args.vocab_size)
+        foreign, latin = self._vocab_masks(tokenizer, vocab)
+        if latin_penalty <= 0:
+            return mx.array(np.where(foreign, -1e9, 0.0).astype(np.float32))
+        latin = latin.copy()
+        # Names, acronyms and model numbers written in the source ("iPhone", "GPU", "M2") stay writable.
+        for word in set(re.findall(r"[A-Za-z0-9][\w+#.-]*", src)):
+            if any(c.isupper() or c.isdigit() for c in word):
+                for form in (word, " " + word):
+                    latin[[i for i in tokenizer.encode(form, add_special_tokens=False) if i < vocab]] = False
+        return mx.array(np.where(foreign, -1e9, np.where(latin, -latin_penalty, 0.0)).astype(np.float32))
+
+    def _translate_one(
+        self,
+        src: str,
+        style: str = "natural",
+        on_partial: Optional[Callable[[str], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> Optional[str]:
         """
-        Hybrid MLX 7B Translator:
-        - 1 cue (instant playhead / live utterance): uses single-sequence Frozen Prefix KVCache (~480ms).
-        - 2..8 cues (lookahead / video batch): uses GPU-parallel `mlx_lm.batch_generate` (~390ms/cue, zero line-merging, exact RoPE).
+        One subtitle line -> Vietnamese in a single streamed pass over the frozen few-shot prefix cache.
+        Decoding cannot emit foreign scripts and is steered off untranslated Latin words, which replaces
+        the old CJK-repair + strict-retranslate LLM round trips (up to 3 extra calls, ~5 s on Chinese).
+        A line still failing the check is retried once with Latin leftovers banned outright.
+        Returns None when `should_stop()` turned true mid-way (an interim result giving way to a final).
         """
-        if not src_texts:
-            return []
         import mlx_lm
         from mlx_lm.sample_utils import make_sampler
 
         key = "literal" if style == "literal" else "natural"
-        sampler = make_sampler(temp=0.0)
-
+        units = len(re.findall(r"\w+", CJK_RE.sub(" ", src))) + sum(len(m) for m in CJK_RE.findall(src))
+        max_tokens = min(200, 24 + 3 * units)
+        vi = ""
         with GPU_LOCK:
             model, tokenizer = self.ensure_llm()
-            if len(src_texts) == 1:
-                txt = src_texts[0]
-                sys_cache, suffix_str = self._get_or_build_prefix_cache(key)
-                prompt_ids = tokenizer.encode(f"Dịch sang tiếng Việt: {txt}{suffix_str}", add_special_tokens=False)
-                out_one = mlx_lm.generate(
+            sys_cache, suffix_str = self._get_or_build_prefix_cache(key)
+            prompt_ids = tokenizer.encode(f"Dịch sang tiếng Việt: {src}{suffix_str}", add_special_tokens=False)
+            for penalty in (LATIN_PENALTY, LATIN_BAN):
+                bias = self._vi_logit_bias(model, tokenizer, src, penalty)
+                raw = ""
+                for resp in mlx_lm.stream_generate(
                     model,
                     tokenizer,
-                    prompt=prompt_ids,
+                    prompt_ids,
+                    max_tokens=max_tokens,
+                    sampler=make_sampler(temp=0.0),
                     prompt_cache=self._clone_prefix_cache(sys_cache),
-                    max_tokens=min(112, max(28, len(txt.split()) * 4 + 22)),
-                    sampler=sampler,
-                    verbose=False,
-                )
-                raw_outputs = [out_one]
-            else:
-                compact_sys = (
-                    "Dịch phụ đề sang tiếng Việt có dấu sát nghĩa, chỉ xuất câu tiếng Việt, không lặp tiếng Anh, không chữ Hán."
-                    if key == "literal"
-                    else "Dịch phụ đề sang tiếng Việt có dấu tự nhiên, ngắn gọn khớp nhịp nói (locally=cục bộ, latency=độ trễ, model=mô hình; giữ AI, GPU, API, token). Tuyệt đối không lặp câu tiếng Anh, không để chữ Hán. Chỉ xuất 1 câu tiếng Việt."
-                )
-                prompts = [
-                    tokenizer.encode(
-                        tokenizer.apply_chat_template(
-                            [
-                                {"role": "system", "content": compact_sys},
-                                {"role": "user", "content": f"Dịch sang tiếng Việt: {txt}"},
-                            ],
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        ),
-                        add_special_tokens=False,
-                    )
-                    for txt in src_texts
-                ]
-                max_toks = [
-                    min(112, max(28, len(txt.split()) * 4 + 22))
-                    for txt in src_texts
-                ]
-                resp = mlx_lm.batch_generate(
-                    model,
-                    tokenizer,
-                    prompts,
-                    max_tokens=max_toks,
-                    sampler=sampler,
-                    verbose=False,
-                )
-                raw_outputs = list(resp.texts)
-
-        final_outputs: List[str] = []
-        for src, raw_vi in zip(src_texts, raw_outputs):
-            vi = self._repair_cjk_if_needed(clean_vi_output(raw_vi))
-            if not is_valid_vi_translation(src, vi):
-                vi = self._strict_retranslate_vi(src)
-            if is_valid_vi_translation(src, vi):
-                if len(self._caption_cache) > 6000:
-                    self._caption_cache.clear()
-                self._caption_cache[f"{style}::{src}"] = vi
-            final_outputs.append(vi or src)
-        return final_outputs
+                    logits_processors=[lambda _tokens, logits, b=bias: logits + b],
+                ):
+                    if should_stop and should_stop():
+                        return None
+                    raw += resp.text
+                    if on_partial and resp.text.strip():
+                        on_partial(clean_vi_output(raw))
+                vi = clean_vi_output(raw)
+                if is_valid_vi_translation(src, vi):
+                    break
+        return vi
 
     # ---------------- Translation & Note Intelligence ----------------
 
@@ -597,19 +697,28 @@ class OfflineModelEngine:
         source_lang: str = "auto",
         context: Optional[List[str]] = None,
         style: str = "natural",
+        on_partial: Optional[Callable[[str], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> str:
+        """Vietnamese for one line; `on_partial` receives the growing translation while it streams.
+        Returns "" if `should_stop` cut it short."""
         clean = text.strip()
-        if not clean:
-            return ""
-        if source_lang == "vi" or detect_script_lang(clean) == "vi":
+        if not clean or not needs_vi_translation(clean, source_lang):
             return clean
 
         cache_key = f"{style}::{clean}"
         cached = self._caption_cache.get(cache_key)
-        if cached and is_valid_vi_translation(clean, cached):
+        if cached:
             return cached
 
-        return self._batch_translate_cues_gpu([clean], style=style)[0]
+        vi = self._translate_one(clean, style, on_partial, should_stop)
+        if vi is None:
+            return ""
+        if is_valid_vi_translation(clean, vi):
+            if len(self._caption_cache) > 6000:
+                self._caption_cache.clear()
+            self._caption_cache[cache_key] = vi
+        return vi or clean
 
     def translate_caption_batch(
         self,
@@ -618,53 +727,19 @@ class OfflineModelEngine:
         context: Optional[List[str]] = None,
         style: str = "natural",
     ) -> List[Dict[str, Any]]:
-        """GPU-parallel 8-cue batch translator using Qwen2.5-7B + Frozen Prefix KVCache (zero line-merging, ~295ms/cue)."""
-        if not cues:
-            return []
-
-        BATCH_SIZE = 8
+        """Cue-by-cue translation (cached). `mlx_lm.batch_generate` measured only ~10% faster per cue
+        on an M2 Pro, and one cue at a time keeps the shared few-shot prefix cache and the
+        Vietnamese-only decoding for every cue."""
         results: List[Dict[str, Any]] = []
-
-        for offset in range(0, len(cues), BATCH_SIZE):
-            chunk = cues[offset : offset + BATCH_SIZE]
-            payload_lines = [
-                {"id": i, "s": str(c.get("text") or c.get("source") or "").strip()}
-                for i, c in enumerate(chunk)
-            ]
-
-            uncached_items: List[Dict[str, Any]] = []
-            resolved_chunk: Dict[int, str] = {}
-            for i, item in enumerate(payload_lines):
-                src_txt = item["s"]
-                if not src_txt or detect_script_lang(src_txt) == "vi":
-                    resolved_chunk[i] = src_txt
-                    continue
-                cache_key = f"{style}::{src_txt}"
-                cached = self._caption_cache.get(cache_key)
-                if cached and is_valid_vi_translation(src_txt, cached):
-                    resolved_chunk[i] = cached
-                else:
-                    uncached_items.append(item)
-
-            if uncached_items:
-                batch_vi = self._batch_translate_cues_gpu(
-                    [it["s"] for it in uncached_items],
-                    style=style,
-                )
-                for it, vi_txt in zip(uncached_items, batch_vi):
-                    resolved_chunk[it["id"]] = vi_txt
-
-            for idx, c in enumerate(chunk):
-                src_txt = payload_lines[idx]["s"]
-                vi_txt = resolved_chunk.get(idx, src_txt)
-                results.append({
-                    "id": c.get("id", offset + idx),
-                    "start": float(c.get("start", 0.0)),
-                    "end": float(c.get("end", 0.0)),
-                    "source": src_txt,
-                    "translation": vi_txt or src_txt,
-                })
-
+        for idx, c in enumerate(cues or []):
+            src_txt = str(c.get("text") or c.get("source") or "").strip()
+            results.append({
+                "id": c.get("id", idx),
+                "start": float(c.get("start", 0.0)),
+                "end": float(c.get("end", 0.0)),
+                "source": src_txt,
+                "translation": self.translate_utterance(src_txt, source_lang, None, style),
+            })
         return results
 
     def group_segments_into_cues(self, segments: List[Dict[str, Any]], words: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -741,7 +816,7 @@ class OfflineModelEngine:
             user_prompt=f"Bản ghi lời thoại:\n{joined}",
             max_tokens=1600,
         )
-        return self._repair_cjk_if_needed(res)
+        return res  # foreign scripts are banned while decoding (_llm_chat)
 
     def ask_note(self, transcript_text: str, summary_text: str, question: str, history: Optional[List[Dict[str, str]]] = None) -> str:
         hist_str = ""
@@ -759,7 +834,7 @@ class OfflineModelEngine:
             ),
             max_tokens=900,
         )
-        return self._repair_cjk_if_needed(res)
+        return res  # foreign scripts are banned while decoding (_llm_chat)
 
     # ---------------- Offline Vietnamese TTS (ZeroTTS CPU) ----------------
 

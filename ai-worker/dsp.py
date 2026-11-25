@@ -42,6 +42,8 @@ class StreamingVAD:
         self.trailing_frames = max(5, round(trailing_silence_ms / 20))
         self.soft_frames = max(40, round(soft_split_sec * 50))
         self.max_frames = max(60, round(max_segment_sec * 50))
+        # Id of the segment being collected: its interim results and its final cut share it.
+        self.segment_id = 0
 
     @property
     def gate_threshold(self) -> float:
@@ -55,12 +57,12 @@ class StreamingVAD:
         self.silent_count = 0
         self.voiced_count = 0
 
-    def feed(self, pcm: np.ndarray) -> List[Tuple[np.ndarray, float]]:
-        """Feed 16 kHz mono float32 samples. Returns list of (segment_pcm, duration_sec)."""
+    def feed(self, pcm: np.ndarray) -> List[Tuple[np.ndarray, float, int]]:
+        """Feed 16 kHz mono float32 samples. Returns list of (segment_pcm, duration_sec, segment_id)."""
         if pcm.size == 0:
             return []
         self.residual = np.concatenate((self.residual, pcm.astype(np.float32, copy=False)))
-        ready: List[Tuple[np.ndarray, float]] = []
+        ready: List[Tuple[np.ndarray, float, int]] = []
 
         while self.residual.size >= FRAME_SAMPLES:
             frame = self.residual[:FRAME_SAMPLES].copy()
@@ -118,7 +120,8 @@ class StreamingVAD:
             if hit_max or hit_soft_breath or hit_silence:
                 if self.voiced_count >= 7:  # >= 140 ms of actual speech
                     seg = np.concatenate(self.active_frames)
-                    ready.append((seg, seg.size / SAMPLE_RATE))
+                    ready.append((seg, seg.size / SAMPLE_RATE, self.segment_id))
+                self.segment_id += 1
                 # Keep small 160 ms overlap tail only if forced cut mid-phoneme without breath pause
                 overlap_tail = self.active_frames[-8:] if (hit_max and is_voiced) else []
                 self.active_frames = list(overlap_tail)
@@ -127,11 +130,22 @@ class StreamingVAD:
 
         return ready
 
-    def flush(self) -> Optional[Tuple[np.ndarray, float]]:
+    def active_audio(self) -> Optional[Tuple[np.ndarray, int]]:
+        """(audio so far, segment_id) of the segment still being spoken, for interim results.
+        None while the speaker pauses or a forced cut is <0.6 s away: its final is about to come,
+        and an interim ASR run then would only delay it."""
+        if (not self.active_frames or self.voiced_count < 7 or self.silent_count >= 3
+                or len(self.active_frames) > self.max_frames - 30):
+            return None
+        return np.concatenate(self.active_frames), self.segment_id
+
+    def flush(self) -> Optional[Tuple[np.ndarray, float, int]]:
+        seg_id = self.segment_id
+        self.segment_id += 1
         if self.active_frames and self.voiced_count >= 7:
             seg = np.concatenate(self.active_frames)
             self.reset()
-            return (seg, seg.size / SAMPLE_RATE)
+            return (seg, seg.size / SAMPLE_RATE, seg_id)
         self.reset()
         return None
 

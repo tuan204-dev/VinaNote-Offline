@@ -31,6 +31,9 @@ export interface TranscriptItem {
   time_label: string;
   asr_ms?: number;
   translate_ms?: number;
+  needs_translation?: boolean;
+  partial?: boolean;
+  interim?: boolean;
 }
 
 export interface VideoCue {
@@ -164,19 +167,49 @@ export default function App() {
       const msg = ev.payload;
       if (!msg) return;
       if (msg.type === "transcript") {
-        const entry: TranscriptItem = {
-          id: msg.id,
-          speaker: msg.speaker || "Người nói",
-          source: msg.source || "system",
-          text: msg.text,
-          time_label: new Date().toLocaleTimeString("vi-VN", { hour12: false }),
-          asr_ms: msg.asr_ms,
-        };
-        setLiveItems((prev) => [...prev, entry]);
+        const timeLabel = new Date().toLocaleTimeString("vi-VN", { hour12: false });
+        setLiveItems((prev) => {
+          if (prev.some((it) => it.id === msg.id)) {
+            return prev.map((it) =>
+              it.id === msg.id
+                ? {
+                    ...it,
+                    text: msg.text,
+                    needs_translation: msg.needs_translation,
+                    asr_ms: msg.asr_ms,
+                    interim: msg.interim,
+                  }
+                : it
+            );
+          }
+          const entry: TranscriptItem = {
+            id: msg.id,
+            speaker: msg.speaker || "Người nói",
+            source: msg.source || "system",
+            text: msg.text,
+            time_label: timeLabel,
+            asr_ms: msg.asr_ms,
+            needs_translation: msg.needs_translation,
+            interim: msg.interim,
+          };
+          return [...prev, entry];
+        });
+      } else if (msg.type === "retract") {
+        setLiveItems((prev) => prev.filter((it) => it.id !== msg.id));
+      } else if (msg.type === "translation_partial") {
+        setLiveItems((prev) =>
+          prev.map((it) => {
+            if (it.id !== msg.id) return it;
+            if (it.translation !== undefined && it.partial !== true) return it;
+            return { ...it, translation: msg.text, partial: true };
+          })
+        );
       } else if (msg.type === "translation") {
         setLiveItems((prev) =>
           prev.map((it) =>
-            it.id === msg.id ? { ...it, translation: msg.text, translate_ms: msg.translate_ms } : it
+            it.id === msg.id
+              ? { ...it, translation: msg.text, translate_ms: msg.translate_ms, partial: false }
+              : it
           )
         );
       } else if (msg.type === "tts_audio" && msg.wav_b64) {
@@ -758,10 +791,43 @@ export default function App() {
                           {item.translate_ms ? ` · Dịch ${Math.round(item.translate_ms)}ms` : ""}
                         </span>
                       </div>
-                      <div className="utterance-src">{item.text}</div>
-                      {item.translation && item.translation !== item.text && (
-                        <div className="utterance-vi">{item.translation}</div>
+                      {item.needs_translation !== false && (
+                        <div
+                          className="utterance-src"
+                          style={item.interim ? { opacity: 0.6, fontStyle: "italic" } : undefined}
+                        >
+                          {item.text}
+                        </div>
                       )}
+                      {item.needs_translation === false ? (
+                        <div
+                          className="utterance-vi"
+                          style={{
+                            marginTop: 0,
+                            paddingTop: 0,
+                            borderTop: "none",
+                            ...(item.interim ? { opacity: 0.6, fontStyle: "italic" } : undefined),
+                          }}
+                        >
+                          {item.text}
+                        </div>
+                      ) : item.translation ? (
+                        (item.needs_translation === true || item.partial || item.translation !== item.text) && (
+                          <div
+                            className="utterance-vi"
+                            style={item.partial ? { opacity: 0.75 } : undefined}
+                          >
+                            {item.translation}
+                          </div>
+                        )
+                      ) : item.needs_translation === true && item.partial !== false ? (
+                        <div
+                          className="utterance-vi"
+                          style={{ color: "var(--muted)", fontWeight: 400, fontStyle: "italic" }}
+                        >
+                          Đang dịch…
+                        </div>
+                      ) : null}
                     </div>
                   ))
                 )}

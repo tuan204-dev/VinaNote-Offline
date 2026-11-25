@@ -2,7 +2,7 @@
 // Supports TWO seamless modes:
 // 1. ZERO-DELAY CAPTION MODE (Automatic whenever YouTube / HTML5 <video> has subtitles!):
 //    - Extracts full timed subtitle cues immediately via page-hook.js (or yt-dlp fallback).
-//    - Translates 3 cues at current playhead FIRST (~0.6s on M2 Pro!), then prefetches +75s ahead in 6-cue micro-batches.
+//    - Translates the playhead cue first, then the next 3, and prefetches +120s ahead in 4-cue batches.
 //    - Pre-synthesizes ZeroTTS Vietnamese voice-over +25s ahead of playhead with dynamic 1.0x..1.35x speed & volume ducking!
 //    - Zero lag: subtitles & dubbing fire at the EXACT millisecond `video.currentTime >= cue.start`!
 //    - Injects a 1-click "VN Dịch" button directly into YouTube's player control bar (.ytp-right-controls)!
@@ -26,6 +26,7 @@
 
   // Caption-Mode state
   let currentVideoId = "";
+  let captionLanguage = "";
   let rawCues = []; // [{ id, start, end, text }]
   let translatedMap = new Map(); // id -> viText
   let inFlightBatch = false;
@@ -184,10 +185,10 @@
   // Also check standard HTML5 <video> textTracks on non-YouTube sites (Coursera, Udemy, etc.)
   function extractHtml5TextTracks() {
     const v = findActiveVideo();
-    if (!v || !v.textTracks) return [];
+    if (!v || !v.textTracks) return { cues: [], language: "" };
     for (const track of Array.from(v.textTracks)) {
       if (track.cues && track.cues.length > 0) {
-        return Array.from(track.cues)
+        const cues = Array.from(track.cues)
           .map((c, idx) => ({
             id: idx,
             start: Number(c.startTime.toFixed(2)),
@@ -195,9 +196,10 @@
             text: (c.text || "").replace(/\s*\n+\s*/g, " ").trim(),
           }))
           .filter((c) => c.text.length > 0);
+        return { cues, language: track.language || "" };
       }
     }
-    return [];
+    return { cues: [], language: "" };
   }
 
   // ---------------- Zero-Delay Caption Scheduler & Pre-Dubbing ----------------
@@ -263,7 +265,7 @@
     if (!translatedMap.has(rawCues[pivot].id)) {
       batchToRun = [rawCues[pivot]];
     } else {
-      // Priority 1B: Next 3 cues immediately following playhead (~1.1s GPU-parallel)
+      // Priority 1B: Next 3 cues immediately following playhead
       for (let i = pivot + 1; i < Math.min(rawCues.length, pivot + 4); i++) {
         if (!translatedMap.has(rawCues[i].id)) {
           batchToRun.push(rawCues[i]);
@@ -272,26 +274,26 @@
     }
 
     if (batchToRun.length === 0) {
-      // Priority 2: Rolling lookahead up to +120s ahead in 8-cue GPU-parallel batches (~295ms/cue)
+      // Priority 2: Rolling lookahead up to +120s ahead in 4-cue batches
       const lookahead = [];
       for (let i = pivot; i < rawCues.length; i++) {
         if (rawCues[i].start > nowSec + 120) break;
         if (!translatedMap.has(rawCues[i].id)) {
           lookahead.push(rawCues[i]);
-          if (lookahead.length >= 8) break;
+          if (lookahead.length >= 4) break;
         }
       }
       batchToRun = lookahead;
     }
 
     if (batchToRun.length === 0) {
-      // Priority 3: Idle full-video prefetch (continues past +120s & wraps to earlier cues until 100% of video is cached!)
+      // Priority 3: Idle full-video prefetch in 4-cue batches, wrapping to earlier cues
       isIdleBackground = true;
       const rest = [];
-      for (let i = pivot; i < rawCues.length && rest.length < 6; i++) {
+      for (let i = pivot; i < rawCues.length && rest.length < 4; i++) {
         if (!translatedMap.has(rawCues[i].id)) rest.push(rawCues[i]);
       }
-      for (let i = 0; i < pivot && rest.length < 6; i++) {
+      for (let i = 0; i < pivot && rest.length < 4; i++) {
         if (!translatedMap.has(rawCues[i].id)) rest.push(rawCues[i]);
       }
       batchToRun = rest;
@@ -322,7 +324,7 @@
       {
         type: "translate-captions-batch",
         cues: batchToRun,
-        language: opts.language,
+        language: captionLanguage || opts.language,
         style: opts.style,
         context: ctx,
       },
@@ -434,13 +436,16 @@
 
   async function tryActivateCaptionMode(newOpts) {
     if (newOpts) opts = { ...opts, ...newOpts };
+    captionLanguage = "";
     ensureOverlay();
     overlayRoot.style.display = "flex";
     modeBadgeEl.textContent = "Đang tìm phụ đề...";
     viEl.textContent = "Đang kiểm tra phụ đề gốc của video...";
+    viEl.style.opacity = "1";
     srcEl.textContent = "";
 
     let cues = [];
+    let language = "";
     let vidId = "";
 
     if (location.hostname.includes("youtube.com")) {
@@ -448,6 +453,7 @@
       vidId = ytRes?.videoId || "";
       if (ytRes?.ok && ytRes.cues?.length > 0) {
         cues = ytRes.cues;
+        language = ytRes.language || "";
       } else {
         // Tier-4 Fallback: ask local AI worker yt-dlp subtitle extractor!
         const fb = await new Promise((resolve) =>
@@ -458,10 +464,11 @@
         );
         if (fb?.ok && fb.cues?.length > 0) {
           cues = fb.cues;
+          language = fb.language || "";
         }
       }
     } else {
-      cues = extractHtml5TextTracks();
+      ({ cues, language } = extractHtml5TextTracks());
     }
 
     if (!cues || cues.length === 0) {
@@ -472,6 +479,7 @@
     activeMode = "captions";
     currentVideoId = vidId || location.href;
     rawCues = cues;
+    captionLanguage = language;
     translatedMap.clear();
     dubCache.clear();
     dubPending.clear();
@@ -499,6 +507,7 @@
 
   function stopAllModes(notifyBg = false) {
     activeMode = null;
+    captionLanguage = "";
     rawCues = [];
     translatedMap.clear();
     spokenKeys.clear();
@@ -607,6 +616,7 @@
         modeBadgeEl.textContent = "🎙 Nghe trực tiếp âm thanh";
         modeBadgeEl.className = "vn-mode-pill live";
         viEl.textContent = "Đang lắng nghe âm thanh video (Offline MLX)...";
+        viEl.style.opacity = "1";
         srcEl.textContent = "";
         updateYouTubeButtonState(true);
       }
@@ -623,17 +633,32 @@
         statusEl.textContent = p.text;
       } else if (p.type === "transcript") {
         srcEl.textContent = p.text || "";
-        const timeStr = new Date().toLocaleTimeString("vi-VN", { hour12: false });
-        historyItems.push({
-          id: p.id,
-          speaker: "Video",
-          source: "browser",
-          text: p.text || "",
-          translation: p.language === "vi" ? p.text : "",
-          time_label: timeStr,
-        });
-        if (p.language === "vi") viEl.textContent = p.text;
+        const isVietnamese = p.needs_translation === false || p.language === "vi";
+        const found = historyItems.find((x) => x.id === p.id);
+        if (found) {
+          found.text = p.text || "";
+          if (isVietnamese) found.translation = p.text;
+        } else {
+          const timeStr = new Date().toLocaleTimeString("vi-VN", { hour12: false });
+          historyItems.push({
+            id: p.id,
+            speaker: "Video",
+            source: "browser",
+            text: p.text || "",
+            translation: isVietnamese ? p.text : "",
+            time_label: timeStr,
+          });
+        }
+        if (isVietnamese) {
+          viEl.textContent = p.text;
+          viEl.style.opacity = "1";
+        }
         statusEl.textContent = `ASR ${Math.round(p.asr_ms || 0)}ms`;
+      } else if (p.type === "retract") {
+        historyItems = historyItems.filter((x) => x.id !== p.id);
+      } else if (p.type === "translation_partial") {
+        viEl.textContent = p.text || "";
+        viEl.style.opacity = "0.85";
       } else if (p.type === "translation") {
         viEl.textContent = p.text || "";
         const found = historyItems.find((x) => x.id === p.id);
