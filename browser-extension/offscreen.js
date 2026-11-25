@@ -117,7 +117,7 @@ async function startCapture(streamId, tabId, options) {
       target: "background",
       type: "overlay-event",
       tabId: activeTabId,
-      payload: { kind: "status", text: "● Đang nghe & dịch Offline (Apple MLX)" },
+      payload: { kind: "status", text: "● Đang nghe & dịch Offline (AI nội bộ)" },
     });
   };
 
@@ -146,7 +146,7 @@ async function startCapture(streamId, tabId, options) {
       tabId: activeTabId,
       payload: {
         kind: "status",
-        text: "Không kết nối được VinaNote Offline (hãy mở ứng dụng VinaNote trên Mac)",
+        text: "Không kết nối được VinaNote Offline (hãy mở ứng dụng VinaNote trên máy tính)",
       },
     });
   };

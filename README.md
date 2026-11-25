@@ -1,4 +1,6 @@
-# VinaNote Offline (macOS Apple Silicon — 100% On-Device AI)
+# VinaNote Offline (macOS Apple Silicon & Windows — 100% On-Device AI)
+
+> **Windows 10/11:** xem hướng dẫn cài đặt tại [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md). Bản Windows dùng faster-whisper + llama.cpp (CUDA / Vulkan / CPU) thay cho MLX, và bộ thu âm WASAPI thay cho ScreenCaptureKit. Giao diện, tiện ích trình duyệt và luật dịch tiếng Việt giữ nguyên.
 
 Ứng dụng ghi âm cuộc họp, dịch phụ đề thời gian thực và thuyết minh lồng tiếng tiếng Việt **chạy 100% nội bộ (Offline)** trên máy Mac dùng chip Apple Silicon (M1/M2/M3/M4), đi kèm Tiện ích mở rộng trình duyệt cho **YouTube, TikTok, Douyin, Bilibili, Facebook, Coursera, Udemy**.
 
@@ -29,3 +31,13 @@ bun run tauri dev
 # Đóng gói lại file .app
 PATH="$HOME/.cargo/bin:$PATH" bun run tauri build
 ```
+
+## 4. Bản Windows
+```powershell
+setup-windows.cmd                      # cài AI Engine (Python, llama.cpp CPU/CUDA/Vulkan, VC++ runtime)
+scripts\windows\build.ps1              # build bộ cài NSIS ngay trên Windows
+```
+```bash
+scripts/windows/cross-build-on-mac.sh  # cross-build bộ cài + gói release/windows/VinaNote-Offline-Windows.zip từ macOS
+```
+Chi tiết: [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md).

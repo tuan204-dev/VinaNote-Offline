@@ -113,7 +113,7 @@
         (res) => {
           statusEl.textContent = res?.ok
             ? `✓ Đã lưu ${itemsToSave.length} câu sang VinaNote!`
-            : "Hãy mở ứng dụng VinaNote Offline trên Mac để lưu.";
+            : "Hãy mở ứng dụng VinaNote Offline trên máy tính để lưu.";
         }
       );
     });

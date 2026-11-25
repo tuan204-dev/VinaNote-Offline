@@ -11,3 +11,8 @@ src-tauri/gen/schemas/
 .venv/
 __pycache__/
 *.pyc
+
+# Windows build outputs (scripts/windows/*)
+release/
+/*-setup.exe
+src-tauri/resources/vinanote-audiocap.exe

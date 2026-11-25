@@ -1,0 +1,31 @@
+[package]
+name = "vinanote-audiocap"
+version = "0.1.0"
+edition = "2021"
+description = "Windows (WASAPI) audio capture helper for VinaNote Offline, drop-in for audio-capture/audiocap.swift"
+publish = false
+
+# Standalone crate: never join an enclosing workspace.
+[workspace]
+
+[dependencies]
+base64 = "0.22"
+serde_json = "1"
+
+[build-dependencies]
+# Link the VC runtime statically (the UCRT ships with Windows 10+), as tauri-build does for the app:
+# the helper must start on a PC without the Visual C++ Redistributable.
+static_vcruntime = "3.0"
+
+[target.'cfg(windows)'.dependencies]
+# Pinned exactly: `AudioClient::new_application_loopback_client(pid, false)` was verified to request
+# PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE in this version's src/api.rs (its doc comment
+# says otherwise). Re-verify before bumping.
+wasapi = "=0.27.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

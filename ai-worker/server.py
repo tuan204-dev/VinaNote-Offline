@@ -16,8 +16,11 @@ import base64
 import io
 import json
 import os
+import platform
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -34,9 +37,18 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from dsp import AcousticEchoSuppressor, PitchGenderTracker, SAMPLE_RATE, StreamingVAD, TextEchoFilter
-from models import OfflineModelEngine, needs_vi_translation
+from models import needs_vi_translation
 
-engine = OfflineModelEngine()
+# MLX needs Apple Silicon; Windows/Linux/Intel Macs run faster-whisper + llama.cpp (models_portable.py).
+_MLX_DEFAULT = sys.platform == "darwin" and platform.machine() == "arm64"
+if os.environ.get("VINANOTE_BACKEND", "mlx" if _MLX_DEFAULT else "portable") == "mlx":
+    from models import OfflineModelEngine as ModelEngine
+else:
+    from models_portable import PortableModelEngine as ModelEngine
+
+engine = ModelEngine()
+# The worker runs without a console on Windows; console children (ffmpeg) would each pop up a window.
+NO_WINDOW: Dict[str, Any] = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 # Under backlog the live loop merges queued VAD segments of one source into a single ASR/MT pass
 # (one encoder run instead of several), so it catches up without dropping speech.
@@ -84,10 +96,17 @@ app.add_middleware(
 
 
 def find_ffmpeg() -> str:
-    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"):
-        if Path(candidate).exists() or candidate == "ffmpeg":
+    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if Path(candidate).exists():
             return candidate
-    return "ffmpeg"
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
+    try:
+        import imageio_ffmpeg  # Windows: ffmpeg.exe bundled by pip (requirements-windows.txt)
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
 
 
 def extract_pcm16k_from_media(
@@ -104,15 +123,35 @@ def extract_pcm16k_from_media(
         cmd += ["-t", f"{duration_sec:.3f}"]
     cmd += ["-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"]
 
-    proc = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, check=False, timeout=120, **NO_WINDOW)
     if proc.returncode != 0 and not proc.stdout:
         err_msg = proc.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"Không giải mã được âm thanh từ media: {err_msg[:240]}")
     return np.frombuffer(proc.stdout, dtype="<f4").copy()
 
 
+def decode_upload_pcm16k(raw_bytes: bytes, suffix: str) -> np.ndarray:
+    """FFmpeg needs a file; temp file, decode and cleanup run together off the event loop
+    (Windows cannot delete a file FFmpeg still has open)."""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(raw_bytes)
+    try:
+        return extract_pcm16k_from_media(tmp.name)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 def probe_media_duration(media_path: str) -> float:
-    ffprobe = find_ffmpeg().replace("ffmpeg", "ffprobe")
+    ffmpeg = find_ffmpeg()
+    ffprobe = str(Path(ffmpeg).with_name(Path(ffmpeg).name.replace("ffmpeg", "ffprobe")))
+    if not shutil.which(ffprobe):  # pip-bundled ffmpeg ships without ffprobe: read "Duration:" from `ffmpeg -i`
+        proc = subprocess.run([ffmpeg, "-hide_banner", "-i", media_path], capture_output=True, text=True,
+                              errors="replace", check=False, timeout=15, **NO_WINDOW)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", proc.stderr)
+        return round(int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]), 2) if m else 0.0
     cmd = [
         ffprobe,
         "-v",
@@ -123,7 +162,7 @@ def probe_media_duration(media_path: str) -> float:
         "default=noprint_wrappers=1:nokey=1",
         media_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=15)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=15, **NO_WINDOW)
     try:
         return round(float(proc.stdout.strip()), 2)
     except Exception:
@@ -285,17 +324,7 @@ async def browser_translate_audio_chunk(
         return {"cues": [], "language": language}
 
     suffix = Path(audio.filename or "chunk.webm").suffix or ".webm"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(raw_bytes)
-        tmp_path = tmp.name
-
-    try:
-        pcm = extract_pcm16k_from_media(tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+    pcm = await asyncio.to_thread(decode_upload_pcm16k, raw_bytes, suffix)
 
     if pcm.size < SAMPLE_RATE // 3:
         return {"cues": [], "language": language}

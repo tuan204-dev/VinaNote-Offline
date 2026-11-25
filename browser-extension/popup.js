@@ -28,7 +28,7 @@ async function init() {
       statusPill.classList.add("err");
       msgBox.textContent = res?.ok
         ? "Đang chờ tải xong bộ model AI Offline..."
-        : "Hãy mở ứng dụng VinaNote Offline trên máy Mac của bạn trước.";
+        : "Hãy mở ứng dụng VinaNote Offline trên máy tính của bạn trước.";
     } else {
       statusPill.textContent = "100% Offline Sẵn sàng";
       statusPill.classList.remove("err");

@@ -21,6 +21,8 @@ import {
 } from "lucide-react";
 
 const AI_URL = "http://127.0.0.1:38479";
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+const baseName = (p: string) => p.split(/[\\/]/).pop() || "";
 
 export interface TranscriptItem {
   id: string;
@@ -231,6 +233,14 @@ export default function App() {
     const unlistenCap = listen<any>("capture-status", (ev) => {
       const p = ev.payload || {};
       if (p.type === "error") setLiveBanner(p.message || "Lỗi thu âm");
+      if (p.type === "status" && p.note === "loopback-no-exclusion") {
+        // Windows 10: system loopback also hears our own dubbing, which would be transcribed as new speech.
+        invoke("update_live_config", { config: { speak_vi: false } }).catch(() => {});
+        setLiveSpeakVi(false);
+        setLiveBanner(
+          "Windows 10 không tách được tiếng của chính VinaNote khỏi âm thanh hệ thống, nên Đọc lồng tiếng đã tắt cho phiên này (Windows 11 không bị giới hạn này)."
+        );
+      }
     });
 
     const unlistenBrowserNote = listen<SavedNote>("browser-note-saved", (ev) => {
@@ -314,7 +324,7 @@ export default function App() {
     if (fetchingWindowRef.current || fromSec >= totalDur - 0.5) return;
     fetchingWindowRef.current = true;
     const sliceLen = Math.min(durSec, totalDur - fromSec);
-    setVideoBusyMsg(`Đang nhận dạng & dịch đoạn ${formatSec(fromSec)} – ${formatSec(fromSec + sliceLen)} (MLX Offline)...`);
+    setVideoBusyMsg(`Đang nhận dạng & dịch đoạn ${formatSec(fromSec)} – ${formatSec(fromSec + sliceLen)} (AI Offline)...`);
     try {
       const ctx = videoCues.slice(-3).map((c) => c.source);
       const resp = await fetch(`${AI_URL}/video/translate-window`, {
@@ -393,7 +403,7 @@ export default function App() {
       // Fast 12-second cold-start window!
       fetchNextVideoWindow(selected, 0, 12, dur);
     } catch {
-      setVideoTitle(selected.split("/").pop() || "Video");
+      setVideoTitle(baseName(selected) || "Video");
       setVideoDuration(3600);
       fetchNextVideoWindow(selected, 0, 12, 3600);
     }
@@ -577,7 +587,7 @@ export default function App() {
     const blob = new Blob([mdLines], { type: "text/markdown;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = outPath.split("/").pop() || "note.md";
+    a.download = baseName(outPath) || "note.md";
     a.click();
   };
 
@@ -608,7 +618,7 @@ export default function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        text: "Xin chào, đây là giọng đọc tiếng Việt chạy hoàn toàn nội bộ trên máy Mac của bạn, không cần kết nối mạng.",
+        text: "Xin chào, đây là giọng đọc tiếng Việt chạy hoàn toàn nội bộ trên máy tính của bạn, không cần kết nối mạng.",
         voice: voiceName === "auto" ? "maichi" : voiceName,
       }),
     });
@@ -625,7 +635,7 @@ export default function App() {
           <div className="brand-badge">VN</div>
           <div>
             <h1>VinaNote Offline</h1>
-            <span>100% On-Device Apple MLX</span>
+            <span>{IS_WINDOWS ? "100% On-Device AI (Windows)" : "100% On-Device Apple MLX"}</span>
           </div>
         </div>
 
@@ -777,7 +787,7 @@ export default function App() {
                 {liveItems.length === 0 ? (
                   <div className="card" style={{ textAlign: "center", color: "var(--muted)", padding: 42 }}>
                     Bấm <b>Bắt đầu Nghe &amp; Dịch</b> để thu đồng thời âm thanh cuộc họp / trình duyệt và micro.
-                    Mọi quá trình nhận dạng (Whisper Turbo), dịch thuật (Qwen2.5-7B) và đọc lồng tiếng (ZeroTTS) đều chạy 100% trên chip Apple M2 Pro của bạn.
+                    Mọi quá trình nhận dạng (Whisper Turbo), dịch thuật (Qwen2.5-7B) và đọc lồng tiếng (ZeroTTS) đều chạy 100% trên {IS_WINDOWS ? "máy tính" : "chip Apple Silicon"} của bạn.
                   </div>
                 ) : (
                   liveItems.map((item) => (
@@ -1086,7 +1096,10 @@ export default function App() {
 
               <div className="card">
                 <div className="controls-row" style={{ justifyContent: "space-between" }}>
-                  <h3 style={{ margin: 0 }}>2. Trạng thái Bộ Mô Hình AI Nội Bộ (Apple Silicon MLX + ONNX)</h3>
+                  <h3 style={{ margin: 0 }}>
+                    2. Trạng thái Bộ Mô Hình AI Nội Bộ (
+                    {IS_WINDOWS ? "faster-whisper + llama.cpp + ONNX" : "Apple Silicon MLX + ONNX"})
+                  </h3>
                   <div className="controls-row">
                     <button className="btn" onClick={() => testVoice("maichi")}>
                       <Volume2 size={14} /> Nghe thử giọng Nữ (Mai Chi)
@@ -1105,6 +1118,13 @@ export default function App() {
                 {dlProgress && (
                   <div style={{ marginTop: 12, color: "#34d399", fontSize: 13 }}>
                     {dlProgress.step} ({dlProgress.percent}%)
+                  </div>
+                )}
+
+                {engineStatus?.devices && Object.keys(engineStatus.devices).length > 0 && (
+                  <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--muted)" }}>
+                    Thiết bị đang chạy: Nhận dạng giọng nói <b>{engineStatus.devices.asr || "chưa nạp"}</b> · Dịch &amp;
+                    Tóm tắt <b>{engineStatus.devices.llm || "chưa nạp"}</b>
                   </div>
                 )}
 
@@ -1131,13 +1151,14 @@ export default function App() {
               </div>
 
               <div className="card">
-                <h3 style={{ marginTop: 0 }}>3. Quyền Hệ Thống macOS</h3>
+                <h3 style={{ marginTop: 0 }}>3. Quyền Hệ Thống {IS_WINDOWS ? "Windows" : "macOS"}</h3>
                 <div className="controls-row" style={{ gap: 20, fontSize: 13.5 }}>
                   <div>
                     Microphone: <b>{perms.microphone || "Chưa kiểm tra"}</b>
                   </div>
                   <div>
-                    Thu âm Hệ thống (ScreenCaptureKit): <b>{perms.system_audio || "Chưa kiểm tra"}</b>
+                    Thu âm Hệ thống ({IS_WINDOWS ? "WASAPI Loopback" : "ScreenCaptureKit"}):{" "}
+                    <b>{perms.system_audio || "Chưa kiểm tra"}</b>
                   </div>
                 </div>
               </div>

@@ -22,6 +22,9 @@ use tower_http::cors::{Any, CorsLayer};
 
 const AI_WORKER_PORT: u16 = 38479;
 const BRIDGE_PORT: u16 = 38478;
+#[cfg(windows)]
+const PROJECT_ROOT_FALLBACK: &str = r"C:\VinaNote-Offline";
+#[cfg(not(windows))]
 const PROJECT_ROOT_FALLBACK: &str = "/Users/tuanda/Projects/VinaNote-Offline";
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -61,30 +64,42 @@ pub struct AppState {
 fn resolve_project_root() -> PathBuf {
     if let Ok(env_root) = std::env::var("VINANOTE_ROOT") {
         let p = PathBuf::from(env_root);
-        if p.exists() {
+        if p.join("ai-worker").exists() {
             return p;
         }
     }
+    // cwd and its parent, then the executable's folders (a dev build sits in src-tauri/target/[<triple>/]<profile>/)
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("ai-worker").exists() {
-            return cwd;
-        }
-        if let Some(parent) = cwd.parent() {
-            if parent.join("ai-worker").exists() {
-                return parent.to_path_buf();
-            }
-        }
+        candidates.extend(cwd.ancestors().take(2).map(PathBuf::from));
     }
-    PathBuf::from(PROJECT_ROOT_FALLBACK)
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.extend(exe.ancestors().skip(1).take(5).map(PathBuf::from));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.join("ai-worker").exists())
+        .unwrap_or_else(|| PathBuf::from(PROJECT_ROOT_FALLBACK))
+}
+
+/// Windows: console children (python.exe, the audio helper) must not pop up a console window.
+fn hide_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd
 }
 
 fn resolve_audiocap_binary(app: &AppHandle) -> PathBuf {
+    let name = format!("vinanote-audiocap{}", std::env::consts::EXE_SUFFIX);
     if let Ok(res_dir) = app.path().resource_dir() {
-        let bundled = res_dir.join("resources").join("vinanote-audiocap");
+        let bundled = res_dir.join("resources").join(&name);
         if bundled.exists() {
             return bundled;
         }
-        let direct = res_dir.join("vinanote-audiocap");
+        let direct = res_dir.join(&name);
         if direct.exists() {
             return direct;
         }
@@ -92,14 +107,14 @@ fn resolve_audiocap_binary(app: &AppHandle) -> PathBuf {
     resolve_project_root()
         .join("src-tauri")
         .join("resources")
-        .join("vinanote-audiocap")
+        .join(name)
 }
 
 fn notes_dir(app: &AppHandle) -> PathBuf {
     let base = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("/Users/tuanda/Library/Application Support/local.vinanote.offline"));
+        .unwrap_or_else(|_| std::env::temp_dir().join("local.vinanote.offline"));
     let dir = base.join("notes");
     let _ = fs::create_dir_all(&dir);
     dir
@@ -123,38 +138,56 @@ async fn is_worker_healthy() -> bool {
 
 fn spawn_ai_worker_process() -> Result<Child, String> {
     let root = resolve_project_root();
-    let py = root.join("ai-worker").join(".venv").join("bin").join("python");
+    let venv = root.join("ai-worker").join(".venv");
+    #[cfg(windows)]
+    let py = venv.join("Scripts").join("python.exe");
+    #[cfg(not(windows))]
+    let py = venv.join("bin").join("python");
     let script = root.join("ai-worker").join("server.py");
     if !py.exists() || !script.exists() {
         return Err(format!(
-            "Không tìm thấy môi trường AI Worker tại: {} / {}",
+            "Không tìm thấy môi trường AI Worker tại: {} / {}{}",
             py.display(),
-            script.display()
+            script.display(),
+            if cfg!(windows) {
+                " — hãy chạy setup-windows.cmd trong thư mục VinaNote-Offline (xem docs/INSTALL-WINDOWS.md)"
+            } else {
+                ""
+            }
         ));
     }
-    Command::new(py)
+    hide_console(&mut Command::new(py))
         .arg(script)
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(AI_WORKER_PORT.to_string())
         .current_dir(root.join("ai-worker"))
+        .env("PYTHONUTF8", "1") // Vietnamese text and paths in Windows' default code page
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("Không khởi chạy được AI Worker: {}", e))
 }
 
+/// Starts the AI worker unless the one we started is still running (maybe still booting). Checked and
+/// spawned under one lock, so the boot task and the first UI refresh cannot both start one (the copy
+/// losing port 38479 used to be tracked while the winner leaked); a worker that exited is replaced.
+fn ensure_worker_spawned(state: &AppState) -> Result<(), String> {
+    let mut guard = state.ai_worker.lock().unwrap();
+    if let Some(child) = guard.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            return Ok(());
+        }
+    }
+    *guard = Some(spawn_ai_worker_process()?);
+    Ok(())
+}
+
 #[tauri::command]
 async fn ensure_ai_worker(state: tauri::State<'_, Arc<AppState>>) -> Result<Value, String> {
     if !is_worker_healthy().await {
-        {
-            let mut guard = state.ai_worker.lock().unwrap();
-            if guard.is_none() {
-                let child = spawn_ai_worker_process()?;
-                *guard = Some(child);
-            }
-        }
+        ensure_worker_spawned(&state)?;
         for _ in 0..35 {
             tokio::time::sleep(Duration::from_millis(300)).await;
             if is_worker_healthy().await {
@@ -170,13 +203,14 @@ async fn ensure_ai_worker(state: tauri::State<'_, Arc<AppState>>) -> Result<Valu
         .map_err(|e| format!("Lỗi đọc trạng thái AI Worker: {}", e))
 }
 
-#[tauri::command]
+// async: off the main thread, so a slow audio driver during `--check` cannot freeze the window
+#[tauri::command(async)]
 fn check_audio_permissions(app: AppHandle) -> Result<Value, String> {
     let bin = resolve_audiocap_binary(&app);
     if !bin.exists() {
         return Err(format!("Chưa có bộ thu âm tại {}", bin.display()));
     }
-    let out = Command::new(bin)
+    let out = hide_console(&mut Command::new(bin))
         .arg("--check")
         .output()
         .map_err(|e| format!("Lỗi kiểm tra quyền thu âm: {}", e))?;
@@ -250,13 +284,14 @@ async fn start_live_capture(
         }
     });
 
-    // Spawn native Swift ScreenCaptureKit + Microphone helper
+    // Spawn the native capture helper (macOS: Swift ScreenCaptureKit, Windows: WASAPI loopback) + microphone
     let bin = resolve_audiocap_binary(&state.app_handle);
     if !bin.exists() {
         return Err(format!("Không tìm thấy binary thu âm: {}", bin.display()));
     }
 
     let mut cmd = Command::new(bin);
+    hide_console(&mut cmd);
     cmd.arg("--exclude-pid")
         .arg(std::process::id().to_string());
     if args.system_audio {
@@ -271,7 +306,7 @@ async fn start_live_capture(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Không chạy được bộ thu âm macOS: {}", e))?;
+        .map_err(|e| format!("Không chạy được bộ thu âm hệ thống: {}", e))?;
 
     let child_stdin = child.stdin.take();
     let child_stdout = child
@@ -303,6 +338,9 @@ async fn start_live_capture(
                 }
             }
         }
+        // The helper has exited (stop, kill or crash): every audio line is forwarded, so the worker
+        // can now cut its last segment without late audio landing in a fresh VAD.
+        let _ = ws_tx_for_audio.send(json!({ "type": "flush" }).to_string());
     });
 
     let handle = LiveCaptureHandle {
@@ -317,7 +355,7 @@ async fn start_live_capture(
 fn stop_live_capture_inner(state: &Arc<AppState>) {
     let taken = state.live_capture.lock().unwrap().take();
     if let Some(h) = taken {
-        let _ = h.ws_tx.send(json!({ "type": "flush" }).to_string());
+        // The worker `flush` follows once the helper's stdout closes (see start_live_capture).
         if let Some(mut stdin) = h.audiocap_stdin.lock().unwrap().take() {
             let _ = writeln!(stdin, "{{\"cmd\":\"stop\"}}");
             let _ = stdin.flush();
@@ -493,9 +531,7 @@ pub fn run() {
             let boot_state = shared.clone();
             tauri::async_runtime::spawn(async move {
                 if !is_worker_healthy().await {
-                    if let Ok(child) = spawn_ai_worker_process() {
-                        *boot_state.ai_worker.lock().unwrap() = Some(child);
-                    }
+                    let _ = ensure_worker_spawned(&boot_state);
                 }
                 start_browser_bridge_server(boot_state).await;
             });
