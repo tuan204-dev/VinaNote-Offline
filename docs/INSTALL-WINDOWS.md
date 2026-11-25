@@ -16,7 +16,7 @@ Trình duyệt dùng tiện ích: Chrome, Edge hoặc Brave. WebView2 có sẵn 
 
 ## 2. Cài đặt nhanh
 
-1. **Giải nén** `VinaNote-Offline-Windows.zip` vào `C:\VinaNote-Offline`.
+1. **Giải nén** `VinaNote-Offline-Windows.zip` vào ổ `C:\`. Trong zip đã có sẵn thư mục `VinaNote-Offline`, nên kết quả là `C:\VinaNote-Offline\setup-windows.cmd`. Đừng giải nén vào một thư mục `VinaNote-Offline` khác, vì sẽ bị lồng hai cấp.
    Nên dùng đúng đường dẫn này vì ứng dụng tự tìm thấy nó. Nếu để chỗ khác, script ở bước 2 sẽ ghi lại vị trí vào biến môi trường `VINANOTE_ROOT`.
 2. **Nhấp đúp `setup-windows.cmd`**. Script sẽ:
    - cài **Microsoft Visual C++ Redistributable** nếu máy chưa có (cần cho faster-whisper, ONNX Runtime và llama.cpp; Windows sẽ hỏi quyền Admin đúng một lần);
@@ -104,7 +104,7 @@ Lỗi sẽ hiện ngay trong cửa sổ đó. Khi AI Engine đã chạy, mở l�
 Mở **Cài đặt > Quyền riêng tư & bảo mật > Micro** rồi bật **Quyền truy cập micro** và **Cho phép ứng dụng máy tính truy cập micro**. Sau đó kiểm tra micro mặc định trong **Cài đặt > Hệ thống > Âm thanh**.
 
 **Windows 10: "Đọc lồng tiếng" tự tắt khi thu âm thanh hệ thống**
-Windows 11 cho phép thu âm thanh hệ thống mà bỏ qua tiếng của chính VinaNote. Windows 10 (kể cả bản cuối 22H2) chưa có tính năng này, nên bộ thu phải nghe toàn bộ âm thanh phát ra, kể cả qua tai nghe. Nếu vẫn lồng tiếng, giọng đọc tiếng Việt sẽ bị chép lại thành lời thoại mới. Vì vậy, trên Windows 10 ứng dụng tự tắt **Đọc lồng tiếng** cho phiên đó và hiện thông báo. Chỉ thu Micro, hoặc dùng tab **Xem & Dịch File Video** và tiện ích trình duyệt, thì vẫn lồng tiếng bình thường.
+Windows 11 cho phép thu âm thanh hệ thống mà bỏ qua tiếng của chính VinaNote. Windows 10 (kể cả bản cuối 22H2) chưa có tính năng này, nên bộ thu phải nghe toàn bộ âm thanh phát ra, kể cả qua tai nghe. Nếu vẫn lồng tiếng, giọng đọc tiếng Việt sẽ bị chép lại thành lời thoại mới. Vì vậy, trên Windows 10 ứng dụng tự tắt **Đọc lồng tiếng** cho phiên đó và hiện thông báo. Hiếm khi, nếu tính năng này lỗi, Windows 11 cũng rơi vào trường hợp này và được xử lý y hệt. Chỉ thu Micro, hoặc dùng tab **Xem & Dịch File Video** và tiện ích trình duyệt, thì vẫn lồng tiếng bình thường.
 
 **Video không phát (màn hình đen) dù vẫn có phụ đề**
 Trình phát của ứng dụng (WebView2) hỗ trợ tốt nhất MP4 (H.264/AAC) và WebM. Hãy chuyển MKV/MOV sang MP4. Trên Windows bản **N** (châu Âu), cần cài thêm **Media Feature Pack** trong *Cài đặt > Ứng dụng > Tính năng tùy chọn*.

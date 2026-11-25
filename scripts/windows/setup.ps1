@@ -1,4 +1,4 @@
-﻿﻿<#
+﻿<#
   VinaNote Offline - cài AI Engine (Python) trên Windows 10/11 x64.
   Nhấp đúp setup-windows.cmd ở thư mục gốc, hoặc:
     powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1 [-Gpu auto|cuda|vulkan|cpu] [-DownloadModels] [-Unattended]
@@ -43,7 +43,8 @@ function Install-Llama([string]$Variant) {
 
 Step "1/6 Kiểm tra Microsoft Visual C++ Redistributable (cần cho faster-whisper, ONNX Runtime, llama.cpp)"
 $Vc = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
-if (-not $Vc -or $Vc.Installed -ne 1) {
+# Wheels built with recent MSVC need a 14.40+ runtime (MSVCP140_1.dll etc.): an older v14 install counts as missing.
+if (-not $Vc -or $Vc.Installed -ne 1 -or [int]$Vc.Minor -lt 40) {
     $VcExe = Join-Path $env:TEMP "vc_redist.x64.exe"
     Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $VcExe -UseBasicParsing
     Write-Host "Windows sẽ hỏi quyền Admin để cài Visual C++ Redistributable (Microsoft)."
@@ -70,14 +71,18 @@ if ($Gpu -eq "auto") {
     if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { $Gpu = "cuda" }
 }
 Step "5/6 Cài llama.cpp cho bộ dịch Qwen2.5 (bản: $Gpu)"
-if ($Gpu -eq "cuda") {
-    # cuBLAS + cuDNN for faster-whisper on the GPU (the llama.cpp CUDA wheel bundles its own CUDA DLLs, ~600 MB)
-    Invoke-Native { uv pip install --python $Py nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" }
-}
-Install-Llama $Gpu
-& $Py -c "import llama_cpp"
-if ($LASTEXITCODE -ne 0 -and $Gpu -ne "cpu") {
-    Write-Warning "Bản llama.cpp '$Gpu' không nạp được trên máy này (driver / GPU), chuyển sang bản CPU."
+try {
+    if ($Gpu -eq "cuda") {
+        # cuBLAS + cuDNN for faster-whisper on the GPU (the llama.cpp CUDA wheel bundles its own CUDA DLLs, ~600 MB)
+        Invoke-Native { uv pip install --python $Py nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*" }
+    }
+    Install-Llama $Gpu
+    & $Py -c "import llama_cpp"
+    if ($LASTEXITCODE -ne 0) { throw "import llama_cpp thất bại (mã $LASTEXITCODE)" }
+} catch {
+    if ($Gpu -eq "cpu") { throw }
+    # A GPU build that cannot be downloaded or loaded (driver, runtime) must not stop the install.
+    Write-Warning "Bản llama.cpp '$Gpu' không cài / nạp được trên máy này ($_), chuyển sang bản CPU."
     $Gpu = "cpu"
     Install-Llama "cpu"
 }
@@ -110,7 +115,7 @@ if ($Installer) {
         if ($Unattended) { $StartArgs.ArgumentList = "/S" }  # NSIS silent install for the current user, no UI
         $P = Start-Process @StartArgs
         $P.WaitForExit()
-        if ($P.ExitCode -ne 0) { Write-Warning "Bộ cài kết thúc với mã $($P.ExitCode)." }
+        if ($P.ExitCode -ne 0) { throw "Bộ cài ứng dụng thất bại (mã $($P.ExitCode))." }
     }
 }
 Write-Host "Mở VinaNote Offline > tab 'Trình duyệt & Model AI' > 'Tải trọn bộ Model Offline' nếu chưa tải model."

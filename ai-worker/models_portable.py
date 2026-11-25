@@ -304,8 +304,9 @@ class PortableModelEngine(OfflineModelEngine):
             frames += frames % 2  # conv2 has stride 2
             mel = fe(audio_f32, padding=max(0, frames * fe.hop_length - audio_f32.size))[:, :frames]
             enc = model.encode(np.pad(mel, ((0, 0), (0, frames - mel.shape[-1]))))
-            if lang is None:
-                lang = max(model.model.detect_language(enc)[0], key=lambda p: p[1])[0][2:-2]  # "<|en|>" -> "en"
+            if lang is None:  # English-only (.en) models cannot detect a language
+                lang = (max(model.model.detect_language(enc)[0], key=lambda p: p[1])[0][2:-2]  # "<|en|>" -> "en"
+                        if model.model.is_multilingual else "en")
             tok = Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task="transcribe", language=lang)
             res = model.model.generate(
                 enc, [tok.sot_sequence + [tok.no_timestamps]], beam_size=1, max_length=224,

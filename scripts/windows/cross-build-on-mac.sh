@@ -11,6 +11,7 @@ T=x86_64-pc-windows-msvc
 
 cargo xwin build --release --target "$T" --manifest-path audio-capture-win/Cargo.toml
 cp "audio-capture-win/target/$T/release/vinanote-audiocap.exe" src-tauri/resources/
+bun install
 bun run tauri build --runner cargo-xwin --target "$T"
 setup=$(ls "src-tauri/target/$T/release/bundle/nsis/"*-setup.exe | head -1)
 

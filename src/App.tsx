@@ -238,7 +238,7 @@ export default function App() {
         invoke("update_live_config", { config: { speak_vi: false } }).catch(() => {});
         setLiveSpeakVi(false);
         setLiveBanner(
-          "Windows 10 không tách được tiếng của chính VinaNote khỏi âm thanh hệ thống, nên Đọc lồng tiếng đã tắt cho phiên này (Windows 11 không bị giới hạn này)."
+          "Máy này không tách được tiếng của chính VinaNote khỏi âm thanh hệ thống (Windows 10 chưa hỗ trợ), nên Đọc lồng tiếng đã tắt cho phiên này để giọng đọc không bị chép lại."
         );
       }
     });
@@ -256,6 +256,11 @@ export default function App() {
       unlistenBrowserNote.then((f) => f());
     };
   }, []);
+
+  // The device line (ASR / LLM on GPU or CPU) is only known once the worker loaded its models.
+  useEffect(() => {
+    if (tab === "models") refreshStatus();
+  }, [tab]);
 
   // ---------------- Live Meeting Handlers ----------------
 
