@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>VinaNote Offline cần quyền Microphone để chép lời và dịch trực tiếp giọng nói của bạn hoàn toàn trên máy.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>VinaNote Offline cần quyền này để thu âm thanh phát ra từ các ứng dụng họp và trình duyệt nhằm dịch trực tiếp 100% trên máy.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>VinaNote Offline thu âm thanh hệ thống để chép lời và dịch trực tiếp hoàn toàn nội bộ (Offline).</string>
+</dict>
+</plist>

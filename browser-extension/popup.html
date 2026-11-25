@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 14px;
+        background: #0f172a;
+        color: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        font-size: 13px;
+      }
+      .hdr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .hdr h3 {
+        margin: 0;
+        font-size: 15px;
+      }
+      .pill {
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 99px;
+        background: rgba(16, 185, 129, 0.18);
+        color: #34d399;
+        font-weight: 600;
+      }
+      .pill.err {
+        background: rgba(239, 68, 68, 0.2);
+        color: #fca5a5;
+      }
+      .field {
+        margin-bottom: 10px;
+      }
+      label {
+        display: block;
+        font-size: 11.5px;
+        color: #94a3b8;
+        margin-bottom: 4px;
+      }
+      select {
+        width: 100%;
+        padding: 7px 9px;
+        background: #1e293b;
+        color: #f8fafc;
+        border: 1px solid #334155;
+        border-radius: 7px;
+        font-size: 13px;
+      }
+      .chk {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 10px 0;
+        cursor: pointer;
+      }
+      button {
+        width: 100%;
+        padding: 10px;
+        border: none;
+        border-radius: 8px;
+        font-size: 13.5px;
+        font-weight: 700;
+        cursor: pointer;
+        background: #10b981;
+        color: #04130d;
+      }
+      button.stop {
+        background: #ef4444;
+        color: #fff;
+      }
+      .hint {
+        margin-top: 10px;
+        font-size: 11.5px;
+        color: #94a3b8;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="hdr">
+      <h3>VinaNote Offline</h3>
+      <span id="statusPill" class="pill">Đang kiểm tra...</span>
+    </div>
+
+    <div class="field">
+      <label>Ngôn ngữ Video (YouTube, TikTok, Douyin...)</label>
+      <select id="langSel">
+        <option value="auto">Tự động nhận diện</option>
+        <option value="en">Tiếng Anh → Tiếng Việt</option>
+        <option value="zh">Tiếng Trung → Tiếng Việt</option>
+        <option value="ja">Tiếng Nhật → Tiếng Việt</option>
+        <option value="ko">Tiếng Hàn → Tiếng Việt</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Phong cách dịch</label>
+      <select id="styleSel">
+        <option value="natural">Tự nhiên · Gọn dễ nghe</option>
+        <option value="literal">Sát nghĩa · Học ngoại ngữ</option>
+      </select>
+    </div>
+
+    <label class="chk">
+      <input type="checkbox" id="speakChk" checked />
+      <span>Thuyết minh tiếng Việt (Tự hạ nhỏ tiếng gốc)</span>
+    </label>
+
+    <div class="field">
+      <label>Giọng thuyết minh ZeroTTS (Offline)</label>
+      <select id="voiceSel">
+        <option value="auto">Tự khớp Nam / Nữ theo video</option>
+        <option value="maichi">Mai Chi (Nữ)</option>
+        <option value="baotrang">Bảo Trang (Nữ)</option>
+        <option value="quangminh">Quang Minh (Nam)</option>
+        <option value="tiendat">Tiến Đạt (Nam)</option>
+      </select>
+    </div>
+
+    <button id="toggleBtn">Bật Dịch &amp; Thuyết Minh Tab Này</button>
+    <div id="msgBox" class="hint">
+      Hỗ trợ mọi video không có sub trên YouTube, TikTok, Facebook, Douyin, Bilibili. Chạy 100% nội bộ không tốn phí.
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
